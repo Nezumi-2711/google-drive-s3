@@ -7,9 +7,27 @@
     "name": "iris",
     "main": "src/index.ts",
     "compatibility_date": "2025-09-27",
+    "vars": {
+        "ALLOW_MULTIPART": "false",
+        "ETAG_STYLE": "md5"
+    },
     "observability": {
         "enabled": true
     },
+    "durable_objects": {
+        "bindings": [
+            {
+                "name": "MPU",
+                "class_name": "MultipartUploadDO"
+            }
+        ]
+    },
+    "migrations": [
+        {
+            "tag": "v1",
+            "new_sqlite_classes": ["MultipartUploadDO"]
+        }
+    ],
     "kv_namespaces": [
         {
             "binding": "AUTH_KV",

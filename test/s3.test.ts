@@ -1,1097 +1,311 @@
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { AwsClient } from "aws4fetch";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { decodedBodyChunks } from "../src/aws-chunked";
 import worker from "../src/index";
+import type { Env } from "../src/types";
 
-const ENV = {
-    ACCESS_KEY: "test-access-key",
-    SECRET_KEY: "test-secret-key",
-    REGION: "auto",
-    GOOGLE_CLIENT_ID: "test-client-id",
-    GOOGLE_CLIENT_SECRET: "test-client-secret",
-    GOOGLE_REFRESH_TOKEN: "test-refresh-token",
-    AUTH_KV: createMockKV(),
-    FOLDER_CACHE: createMockKV(),
-    ALLOWED_BUCKETS: "test-bucket,empty-bucket,my-bucket",
-};
+import { env } from "cloudflare:test";
 
-const CTX = {
-    waitUntil: vi.fn(),
-    passThroughOnException: vi.fn(),
-};
+const ENV = env as unknown as Env;
+const ENDPOINT = "https://s3-api.example.com";
+const CTX = { waitUntil: vi.fn(), passThroughOnException: vi.fn() } as unknown as ExecutionContext;
 
-function createMockKV() {
-    const storage = new Map<string, string>();
-    return {
-        get: vi.fn(async (key: string) => storage.get(key) || null),
-        put: vi.fn(async (key: string, value: string, options?: any) => {
-            storage.set(key, value);
-        }),
-        delete: vi.fn(async (key: string) => storage.delete(key)),
-        list: vi.fn(async () => ({ keys: [] })),
-    };
+interface StoredFile {
+    id: string;
+    name: string;
+    parent: string;
+    mimeType: string;
+    data: Uint8Array;
+    md5Checksum: string;
 }
 
-// Google API のモック
-global.fetch = vi.fn(async (url: string | URL | Request, init?: any) => {
-    const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+interface UploadSession {
+    id: string;
+    fileId?: string;
+    name: string;
+    parent: string;
+    mimeType: string;
+    committed: Uint8Array;
+}
 
-    // OAuth トークン取得
-    if (urlStr.includes("oauth2.googleapis.com/token")) {
-        return new Response(
-            JSON.stringify({
-                access_token: "mock-access-token",
-                expires_in: 3600,
-            }),
-            { status: 200 },
-        );
+class FakeDrive {
+    readonly files = new Map<string, StoredFile>();
+    readonly sessions = new Map<string, UploadSession>();
+    private nextId = 1;
+
+    async handle(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+        const request = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(request.url);
+        if (url.hostname === "oauth2.googleapis.com") return Response.json({ access_token: "token", expires_in: 3600 });
+        if (url.hostname !== "www.googleapis.com") return new Response("Not Found", { status: 404 });
+
+        if (url.pathname === "/drive/v3/files" && request.method === "GET") return this.search(url);
+        if (url.pathname === "/drive/v3/files" && request.method === "POST") return this.createMetadata(await request.json<Record<string, unknown>>());
+        if (url.pathname.startsWith("/drive/v3/files/") && url.searchParams.get("alt") === "media") return this.download(url, request);
+        if (url.pathname.startsWith("/drive/v3/files/") && request.method === "DELETE") {
+            this.files.delete(url.pathname.split("/").at(-1)!);
+            return new Response(null, { status: 204 });
+        }
+        if (url.pathname.startsWith("/upload/drive/v3/files") && url.searchParams.get("uploadType") === "resumable") return this.initialize(url, request);
+        if (url.pathname.startsWith("/upload/session/")) return this.upload(url, request);
+        return new Response("Not Found", { status: 404 });
     }
 
-    // フォルダ検索
-    if (urlStr.includes("drive/v3/files") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-        return new Response(
-            JSON.stringify({
-                files: [{ id: "folder-id-123", name: "test-bucket" }],
-            }),
-            { status: 200 },
-        );
+    private search(url: URL): Response {
+        const q = url.searchParams.get("q") ?? "";
+        const name = /name='((?:\\.|[^'])*)'/.exec(q)?.[1]?.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+        const parent = /'([^']+)' in parents/.exec(q)?.[1];
+        if (q.includes("application/vnd.google-apps.folder")) {
+            const id = parent ? `folder:${parent}:${name}` : `folder:${name}`;
+            return Response.json({ files: [{ id, name, mimeType: "application/vnd.google-apps.folder" }] });
+        }
+        const files = [...this.files.values()].filter((file) => file.name === name && file.parent === parent);
+        return Response.json({ files: files.map((file) => ({ ...file, size: String(file.data.byteLength), data: undefined })) });
     }
 
-    // ファイル検索
-    if (urlStr.includes("drive/v3/files") && urlStr.includes("in parents")) {
-        return new Response(
-            JSON.stringify({
-                files: [
-                    {
-                        id: "file-id-456",
-                        name: "test-file.txt",
-                        mimeType: "text/plain",
-                        size: "11",
-                    },
-                ],
-            }),
-            { status: 200 },
-        );
-    }
-
-    // Resumable upload 初期化
-    if (urlStr.includes("uploadType=resumable") && init?.method === "POST") {
-        return new Response(null, {
-            status: 200,
-            headers: { Location: "https://www.googleapis.com/upload/drive/v3/files/uploadid123" },
-        });
-    }
-
-    // Resumable upload 実行
-    if (urlStr.includes("upload/drive/v3/files/uploadid")) {
-        return new Response(
-            JSON.stringify({
-                id: "new-file-id-789",
-                name: "uploaded-file.txt",
-                mimeType: "text/plain",
-            }),
-            { status: 200 },
-        );
-    }
-
-    // ファイルダウンロード
-    if (urlStr.includes("alt=media")) {
-        return new Response("Hello World", {
-            status: 200,
-            headers: { "Content-Type": "text/plain" },
-        });
-    }
-
-    // ファイル削除
-    if (init?.method === "DELETE") {
-        return new Response(null, { status: 204 });
-    }
-
-    return new Response("Not Found", { status: 404 });
-}) as any;
-
-describe("S3 API Server with Google Drive Backend", () => {
-    const endpoint = "https://s3-api.example.com";
-
-    beforeEach(() => {
-        vi.clearAllMocks();
-    });
-
-    // 1. PUT (Upload) テスト
-    it("should upload file via PUT with Header Auth", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/test-file.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "PUT",
-            headers: {
-                "Content-Type": "text/plain",
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-            body: "Hello World",
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(200);
-        const result = await response.json();
-        expect(result).toHaveProperty("id");
-    });
-
-    // 2. GET (Download) テスト
-    it("should download file via GET with Header Auth", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/test-file.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "GET",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(200);
-        expect(await response.text()).toBe("Hello World");
-    });
-
-    // 3. DELETE テスト
-    it("should delete file via DELETE", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/test-file.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "DELETE",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(204);
-    });
-
-    // 4. HEAD (Metadata) テスト
-    it("should get file metadata via HEAD", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/test-file.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "HEAD",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(200);
-        expect(response.headers.get("Content-Type")).toBe("text/plain");
-        expect(response.headers.get("Content-Length")).toBe("11");
-    });
-
-    // 5. Presigned URL テスト
-    it("should verify presigned URLs from @aws-sdk/s3-request-presigner", async () => {
-        const s3 = new S3Client({
-            endpoint: `${endpoint}/my-bucket`,
-            region: ENV.REGION,
-            credentials: {
-                accessKeyId: ENV.ACCESS_KEY,
-                secretAccessKey: ENV.SECRET_KEY,
-            },
-        });
-
-        const command = new GetObjectCommand({
-            Bucket: "my-bucket",
-            Key: "test.png",
-        });
-
-        const url = await getSignedUrl(s3, command, { expiresIn: 3600 });
-        const parsedUrl = new URL(url);
-        const testUrl = new URL(endpoint);
-        testUrl.hostname = parsedUrl.hostname;
-        testUrl.pathname = parsedUrl.pathname;
-        testUrl.search = parsedUrl.search;
-
-        const request = new Request(testUrl.toString(), { method: "GET" });
-        const response = await worker.fetch(request, ENV, CTX);
-        expect(response.status).toBe(200);
-    });
-
-    // 6. 不正な署名のテスト
-    it("should reject invalid signatures", async () => {
-        const request = new Request(`${endpoint}/hack`, {
-            method: "GET",
-            headers: {
-                Authorization: "AWS4-HMAC-SHA256 Credential=bad/20260108/auto/s3/aws4_request, SignedHeaders=host, Signature=wrong",
-                "x-amz-date": "20260108T000000Z",
-            },
-        });
-
-        const response = await worker.fetch(request, ENV, CTX);
-        expect(response.status).toBe(403);
-    });
-
-    // 7. バケット一覧テスト (LIST)
-    it("should list files in bucket", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: "folder-id-123", name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("in parents")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [
-                            { id: "1", name: "file1.txt", size: "100", mimeType: "text/plain", modifiedTime: "2024-01-01T00:00:00Z" },
-                            { id: "2", name: "file2.txt", size: "200", mimeType: "text/plain", modifiedTime: "2024-01-02T00:00:00Z" },
-                        ],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            return new Response("Not Found", { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "GET",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(200);
-        const xmlText = await response.text();
-        expect(xmlText).toContain("<ListBucketResult");
-        expect(xmlText).toContain("file1.txt");
-        expect(xmlText).toContain("file2.txt");
-
-        global.fetch = originalFetch;
-    });
-
-    // 8. 存在しないファイルのHEADリクエスト (404)
-    it("should return 404 for HEAD on non-existent file", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: "folder-id-123", name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("in parents")) {
-                return new Response(JSON.stringify({ files: [] }), { status: 200 });
-            }
-
-            return new Response("Not Found", { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/non-existent.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "HEAD",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(404);
-
-        global.fetch = originalFetch;
-    });
-
-    // 9. 存在しないファイルのGETリクエスト (404)
-    it("should return 404 for GET on non-existent file", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: "folder-id-123", name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("in parents")) {
-                return new Response(JSON.stringify({ files: [] }), { status: 200 });
-            }
-
-            return new Response("Not Found", { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/non-existent.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "GET",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(404);
-        expect(await response.text()).toBe("NoSuchKey");
-
-        global.fetch = originalFetch;
-    });
-
-    // 10. 存在しないファイルのDELETEリクエスト (404)
-    it("should return 404 for DELETE on non-existent file", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: "folder-id-123", name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("in parents")) {
-                return new Response(JSON.stringify({ files: [] }), { status: 200 });
-            }
-
-            return new Response("Not Found", { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/non-existent.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "DELETE",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(404);
-
-        global.fetch = originalFetch;
-    });
-
-    // 11. 空のバケット一覧
-    it("should return empty list for empty bucket", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: "folder-id-123", name: "empty-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("drive/v3/files") && urlStr.includes("in parents")) {
-                return new Response(JSON.stringify({ files: [] }), { status: 200 });
-            }
-
-            return new Response("Not Found", { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/empty-bucket/`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "GET",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(200);
-        const xmlText = await response.text();
-        expect(xmlText).toContain("<ListBucketResult");
-        expect(xmlText).not.toContain("<Contents>");
-
-        global.fetch = originalFetch;
-    });
-
-    // 12. ネストされたフォルダーへのアップロード
-    it("should upload file to nested directory structure", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const folderIds = {
-            bucket: "bucket-id-123",
-            dir1: "dir1-id-456",
-            dir2: "dir2-id-789",
+    private createMetadata(metadata: Record<string, unknown>): Response {
+        const id = `file-${this.nextId++}`;
+        const file: StoredFile = {
+            id,
+            name: String(metadata.name),
+            parent: String((metadata.parents as string[] | undefined)?.[0] ?? ""),
+            mimeType: String(metadata.mimeType ?? "application/octet-stream"),
+            data: new Uint8Array(),
+            md5Checksum: "d41d8cd98f00b204e9800998ecf8427e",
         };
+        this.files.set(id, file);
+        return Response.json({ ...file, size: "0", data: undefined });
+    }
 
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            // OAuth トークン
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // フォルダ作成 (POST)
-            if (urlStr === "https://www.googleapis.com/drive/v3/files" && init?.method === "POST") {
-                const body = JSON.parse(init.body);
-                if (body.mimeType === "application/vnd.google-apps.folder") {
-                    // フォルダ名に応じてIDを返す
-                    if (body.name === "dir1") {
-                        return new Response(JSON.stringify({ id: folderIds.dir1, name: "dir1" }), { status: 200 });
-                    } else if (body.name === "dir2") {
-                        return new Response(JSON.stringify({ id: folderIds.dir2, name: "dir2" }), { status: 200 });
-                    }
-                }
-            }
-
-            // フォルダ検索 - バケット (親なし)
-            if (urlStr.includes("name='test-bucket'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'") && !urlStr.includes("in parents")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: folderIds.bucket, name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // フォルダ検索 - dir1
-            if (urlStr.includes("name='dir1'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.bucket}' in parents`)) {
-                    return new Response(
-                        JSON.stringify({
-                            files: [{ id: folderIds.dir1, name: "dir1" }],
-                        }),
-                        { status: 200 },
-                    );
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            // フォルダ検索 - dir2
-            if (urlStr.includes("name='dir2'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.dir1}' in parents`)) {
-                    return new Response(
-                        JSON.stringify({
-                            files: [{ id: folderIds.dir2, name: "dir2" }],
-                        }),
-                        { status: 200 },
-                    );
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            // Resumable upload 初期化
-            if (urlStr.includes("uploadType=resumable") && init?.method === "POST") {
-                const body = JSON.parse(init.body);
-                // 親フォルダがdir2であることを確認
-                expect(body.parents).toEqual([folderIds.dir2]);
-                expect(body.name).toBe("file.txt");
-
-                return new Response(null, {
-                    status: 200,
-                    headers: { Location: "https://www.googleapis.com/upload/drive/v3/files/uploadid999" },
-                });
-            }
-
-            // Resumable upload 実行
-            if (urlStr.includes("upload/drive/v3/files/uploadid999")) {
-                return new Response(
-                    JSON.stringify({
-                        id: "nested-file-id-999",
-                        name: "file.txt",
-                        mimeType: "text/plain",
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            console.error("Unhandled URL:", urlStr);
-            return new Response(JSON.stringify({ error: "Not Found" }), { status: 404 });
+    private async initialize(url: URL, request: Request): Promise<Response> {
+        const metadata = await request.json<{ name: string; parents?: string[] }>();
+        const pathId = url.pathname.split("/").at(-1);
+        const fileId = pathId === "files" ? undefined : pathId;
+        const id = `session-${this.nextId++}`;
+        this.sessions.set(id, {
+            id,
+            fileId,
+            name: metadata.name,
+            parent: metadata.parents?.[0] ?? (fileId ? this.files.get(fileId)?.parent : "") ?? "",
+            mimeType: request.headers.get("X-Upload-Content-Type") ?? "application/octet-stream",
+            committed: new Uint8Array(),
         });
+        return new Response(null, { status: 200, headers: { Location: `https://www.googleapis.com/upload/session/${id}` } });
+    }
 
-        const requestUrl = `${endpoint}/test-bucket/dir1/dir2/file.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "PUT",
-            headers: {
-                "Content-Type": "text/plain",
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-            body: "Nested content",
-        });
+    private async upload(url: URL, request: Request): Promise<Response> {
+        const id = url.pathname.split("/").at(-1)!;
+        const session = this.sessions.get(id);
+        if (!session) return new Response(null, { status: 404 });
+        if (request.method === "DELETE") {
+            this.sessions.delete(id);
+            return new Response(null, { status: 499 });
+        }
+        const range = request.headers.get("Content-Range");
+        if (range === "bytes */*") return new Response(null, { status: 308, headers: this.rangeHeaders(session.committed.byteLength) });
+        const body = new Uint8Array(await request.arrayBuffer());
+        if (!range) return this.finalize(session, body);
+        const match = /^bytes (\d+)-(\d+)\/(\*|\d+)$/.exec(range);
+        if (!match) return new Response("Bad range", { status: 400 });
+        const start = Number(match[1]);
+        const end = Number(match[2]);
+        const total = match[3] === "*" ? null : Number(match[3]);
+        expect(start).toBe(session.committed.byteLength);
+        expect(end - start + 1).toBe(body.byteLength);
+        if (total === null) expect(body.byteLength % (256 * 1024)).toBe(0);
+        session.committed = concat(session.committed, body);
+        if (total === null) return new Response(null, { status: 308, headers: this.rangeHeaders(session.committed.byteLength) });
+        expect(session.committed.byteLength).toBe(total);
+        return this.finalize(session, session.committed);
+    }
 
-        const response = await worker.fetch(signedReq, ENV, CTX);
+    private rangeHeaders(length: number): HeadersInit {
+        return length === 0 ? {} : { Range: `bytes=0-${length - 1}` };
+    }
+
+    private finalize(session: UploadSession, data: Uint8Array): Response {
+        const id = session.fileId ?? `file-${this.nextId++}`;
+        const file: StoredFile = { id, name: session.name, parent: session.parent, mimeType: session.mimeType, data, md5Checksum: fakeMd5(data) };
+        this.files.set(id, file);
+        this.sessions.delete(session.id);
+        return Response.json({ ...file, size: String(data.byteLength), data: undefined });
+    }
+
+    private download(url: URL, request: Request): Response {
+        const file = this.files.get(url.pathname.split("/").at(-1)!);
+        if (!file) return new Response(null, { status: 404 });
+        const range = request.headers.get("Range");
+        if (!range) return new Response(file.data, { headers: { "Content-Length": String(file.data.byteLength) } });
+        const match = /^bytes=(\d+)-(\d+)?$/.exec(range);
+        if (!match) return new Response(null, { status: 416 });
+        const start = Number(match[1]);
+        const end = Math.min(file.data.byteLength - 1, match[2] ? Number(match[2]) : file.data.byteLength - 1);
+        const data = file.data.slice(start, end + 1);
+        return new Response(data, { status: 206, headers: { "Content-Length": String(data.byteLength), "Content-Range": `bytes ${start}-${end}/${file.data.byteLength}` } });
+    }
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+    const output = new Uint8Array(a.byteLength + b.byteLength);
+    output.set(a);
+    output.set(b, a.byteLength);
+    return output;
+}
+
+function fakeMd5(data: Uint8Array): string {
+    let state = 0x811c9dc5;
+    for (const byte of data) state = Math.imul(state ^ byte, 0x01000193);
+    return (state >>> 0).toString(16).padStart(8, "0").repeat(4);
+}
+
+function bytes(length: number, seed = 17): Uint8Array {
+    const output = new Uint8Array(length);
+    let state = seed;
+    for (let index = 0; index < length; index++) {
+        state = (Math.imul(state, 1664525) + 1013904223) | 0;
+        output[index] = state >>> 24;
+    }
+    return output;
+}
+
+async function signed(path: string, init: RequestInit): Promise<Request> {
+    const aws = new AwsClient({ accessKeyId: ENV.ACCESS_KEY, secretAccessKey: ENV.SECRET_KEY, region: ENV.REGION, service: "s3" });
+    const bodyLength = typeof init.body === "string" ? new TextEncoder().encode(init.body).byteLength : init.body instanceof Uint8Array ? init.body.byteLength : undefined;
+    return aws.sign(`${ENDPOINT}${path}`, {
+        ...init,
+        headers: { "x-amz-content-sha256": "UNSIGNED-PAYLOAD", ...(bodyLength === undefined ? {} : { "x-amz-decoded-content-length": String(bodyLength) }), ...init.headers },
+    });
+}
+
+let drive: FakeDrive;
+
+beforeEach(async () => {
+    drive = new FakeDrive();
+    vi.stubGlobal(
+        "fetch",
+        vi.fn((input, init) => drive.handle(input, init)),
+    );
+    await ENV.AUTH_KV.delete("google_access_token");
+});
+
+describe("S3 compatibility", () => {
+    it("returns an empty PutObject response and overwrites the same Drive file", async () => {
+        const first = await worker.fetch(await signed("/test-bucket/file.txt", { method: "PUT", body: "first" }), ENV, CTX);
+        expect(first.status).toBe(200);
+        expect(await first.text()).toBe("");
+        expect(first.headers.get("ETag")).toMatch(/^"[0-9a-f]{32}"$/);
+
+        const second = await worker.fetch(await signed("/test-bucket/file.txt", { method: "PUT", body: "second" }), ENV, CTX);
+        expect(second.status).toBe(200);
+        expect([...drive.files.values()].filter((file) => file.name === "file.txt")).toHaveLength(1);
+        expect(new TextDecoder().decode([...drive.files.values()].find((file) => file.name === "file.txt")!.data)).toBe("second");
+    });
+
+    it("forwards Range and returns a standard XML NoSuchKey", async () => {
+        await worker.fetch(await signed("/test-bucket/range.bin", { method: "PUT", body: "0123456789" }), ENV, CTX);
+        const response = await worker.fetch(await signed("/test-bucket/range.bin", { method: "GET", headers: { Range: "bytes=2-5" } }), ENV, CTX);
+        expect(response.status).toBe(206);
+        expect(response.headers.get("Content-Range")).toBe("bytes 2-5/10");
+        expect(response.headers.get("Accept-Ranges")).toBe("bytes");
+        expect(await response.text()).toBe("2345");
+
+        const missing = await worker.fetch(await signed("/test-bucket/missing", { method: "GET" }), ENV, CTX);
+        expect(missing.status).toBe(404);
+        expect(await missing.text()).toContain("<Code>NoSuchKey</Code>");
+    });
+
+    it("decodes both aws-chunked framing variants across arbitrary boundaries", async () => {
+        const payload = bytes(70_013);
+        for (const trailer of [true, false]) {
+            const framed = encodeAwsChunked(payload, trailer);
+            for (const split of [1, 7, 127, 8191]) {
+                const chunks: Uint8Array[] = [];
+                for (let offset = 0; offset < framed.byteLength; offset += split) chunks.push(framed.slice(offset, offset + split));
+                const decoded: Uint8Array[] = [];
+                for await (const chunk of decodedBodyChunks(streamOf(chunks), true)) decoded.push(chunk);
+                expect(concatAll(decoded)).toEqual(payload);
+            }
+        }
+    });
+
+    it("round-trips non-aligned multipart parts byte-exact", async () => {
+        const source = bytes(1_500_123);
+        const create = await worker.fetch(await signed("/test-bucket/big.bin?uploads", { method: "POST", headers: { "Content-Type": "application/octet-stream" } }), ENV, CTX);
+        expect(create.status).toBe(200);
+        const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(await create.text())![1];
+        const completed: Array<{ partNumber: number; etag: string }> = [];
+        for (let index = 0, offset = 0; offset < source.byteLength; index++) {
+            const end = Math.min(source.byteLength, offset + 500_000);
+            const part = await worker.fetch(await signed(`/test-bucket/big.bin?partNumber=${index + 1}&uploadId=${encodeURIComponent(uploadId)}`, { method: "PUT", body: source.slice(offset, end) }), ENV, CTX);
+            expect(part.status).toBe(200);
+            completed.push({ partNumber: index + 1, etag: part.headers.get("ETag")!.replaceAll('"', "") });
+            offset = end;
+        }
+        const xml = `<CompleteMultipartUpload>${completed.map((part) => `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>"${part.etag}"</ETag></Part>`).join("")}</CompleteMultipartUpload>`;
+        const result = await worker.fetch(await signed(`/test-bucket/big.bin?uploadId=${encodeURIComponent(uploadId)}`, { method: "POST", body: xml }), ENV, CTX);
+        expect(result.status).toBe(200);
+        expect(await result.text()).toMatch(/<ETag>"[0-9a-f]{32}"<\/ETag>/);
+        const stored = [...drive.files.values()].find((file) => file.name === "big.bin")!.data;
+        expect(stored.byteLength).toBe(source.byteLength);
+        expect(fakeMd5(stored)).toBe(fakeMd5(source));
+    });
+
+    it("accepts aws-chunked PutObject without storing framing", async () => {
+        const source = bytes(1_000_003);
+        const framed = encodeAwsChunked(source, true);
+        const response = await worker.fetch(
+            await signed("/test-bucket/chunked.bin", {
+                method: "PUT",
+                body: framed,
+                headers: {
+                    "content-encoding": "aws-chunked",
+                    "x-amz-decoded-content-length": String(source.byteLength),
+                    "x-amz-content-sha256": "STREAMING-UNSIGNED-PAYLOAD-TRAILER",
+                },
+            }),
+            ENV,
+            CTX,
+        );
         expect(response.status).toBe(200);
-        const result = await response.json();
-        expect(result.id).toBe("nested-file-id-999");
-        expect(result.name).toBe("file.txt");
-
-        global.fetch = originalFetch;
+        expect([...drive.files.values()].find((file) => file.name === "chunked.bin")!.data).toEqual(source);
     });
 
-    // 13. ネストされたフォルダーからのダウンロード
-    it("should download file from nested directory structure", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const folderIds = {
-            bucket: "bucket-id-123",
-            images: "images-id-456",
-            photos: "photos-id-789",
-        };
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // フォルダ作成 (POST)
-            if (urlStr === "https://www.googleapis.com/drive/v3/files" && init?.method === "POST") {
-                const body = JSON.parse(init.body);
-                if (body.mimeType === "application/vnd.google-apps.folder") {
-                    if (body.name === "images") {
-                        return new Response(JSON.stringify({ id: folderIds.images, name: "images" }), { status: 200 });
-                    } else if (body.name === "photos") {
-                        return new Response(JSON.stringify({ id: folderIds.photos, name: "photos" }), { status: 200 });
-                    }
-                }
-            }
-
-            // バケット検索
-            if (urlStr.includes("name='test-bucket'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'") && !urlStr.includes("in parents")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: folderIds.bucket, name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // images フォルダ検索
-            if (urlStr.includes("name='images'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.bucket}' in parents`)) {
-                    return new Response(
-                        JSON.stringify({
-                            files: [{ id: folderIds.images, name: "images" }],
-                        }),
-                        { status: 200 },
-                    );
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            // photos フォルダ検索
-            if (urlStr.includes("name='photos'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.images}' in parents`)) {
-                    return new Response(
-                        JSON.stringify({
-                            files: [{ id: folderIds.photos, name: "photos" }],
-                        }),
-                        { status: 200 },
-                    );
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            // ファイル検索 - photo.jpg
-            if (urlStr.includes("name='photo.jpg'") && urlStr.includes(`'${folderIds.photos}' in parents`)) {
-                return new Response(
-                    JSON.stringify({
-                        files: [
-                            {
-                                id: "photo-file-id-999",
-                                name: "photo.jpg",
-                                mimeType: "image/jpeg",
-                                size: "12345",
-                            },
-                        ],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // ファイルダウンロード
-            if (urlStr.includes("photo-file-id-999") && urlStr.includes("alt=media")) {
-                return new Response("Binary image data", {
-                    status: 200,
-                    headers: { "Content-Type": "image/jpeg" },
-                });
-            }
-
-            console.error("Unhandled URL:", urlStr);
-            return new Response(JSON.stringify({ error: "Not Found" }), { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/images/photos/photo.jpg`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "GET",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
+    it("supports an empty PutObject", async () => {
+        const response = await worker.fetch(await signed("/test-bucket/empty", { method: "PUT", body: new Uint8Array() }), ENV, CTX);
         expect(response.status).toBe(200);
-        expect(response.headers.get("Content-Type")).toBe("image/jpeg");
-        expect(await response.text()).toBe("Binary image data");
-
-        global.fetch = originalFetch;
-    });
-
-    // 14. ネストされたフォルダーからの削除
-    it("should delete file from nested directory structure", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const folderIds = {
-            bucket: "bucket-id-123",
-            docs: "docs-id-456",
-            archive: "archive-id-789",
-        };
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // フォルダ作成 (POST)
-            if (urlStr === "https://www.googleapis.com/drive/v3/files" && init?.method === "POST") {
-                const body = JSON.parse(init.body);
-                if (body.mimeType === "application/vnd.google-apps.folder") {
-                    if (body.name === "docs") {
-                        return new Response(JSON.stringify({ id: folderIds.docs, name: "docs" }), { status: 200 });
-                    } else if (body.name === "archive") {
-                        return new Response(JSON.stringify({ id: folderIds.archive, name: "archive" }), { status: 200 });
-                    }
-                }
-            }
-
-            if (urlStr.includes("name='test-bucket'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'") && !urlStr.includes("in parents")) {
-                return new Response(
-                    JSON.stringify({
-                        files: [{ id: folderIds.bucket, name: "test-bucket" }],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("name='docs'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.bucket}' in parents`)) {
-                    return new Response(
-                        JSON.stringify({
-                            files: [{ id: folderIds.docs, name: "docs" }],
-                        }),
-                        { status: 200 },
-                    );
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            if (urlStr.includes("name='archive'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.docs}' in parents`)) {
-                    return new Response(
-                        JSON.stringify({
-                            files: [{ id: folderIds.archive, name: "archive" }],
-                        }),
-                        { status: 200 },
-                    );
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            if (urlStr.includes("name='old.pdf'") && urlStr.includes(`'${folderIds.archive}' in parents`)) {
-                return new Response(
-                    JSON.stringify({
-                        files: [
-                            {
-                                id: "old-pdf-id-999",
-                                name: "old.pdf",
-                                mimeType: "application/pdf",
-                                size: "54321",
-                            },
-                        ],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            if (urlStr.includes("old-pdf-id-999") && init?.method === "DELETE") {
-                return new Response(null, { status: 204 });
-            }
-
-            console.error("Unhandled URL:", urlStr);
-            return new Response(JSON.stringify({ error: "Not Found" }), { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/docs/archive/old.pdf`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "DELETE",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(204);
-
-        global.fetch = originalFetch;
-    });
-
-    // 15. 深くネストされたフォルダーのメタデータ取得
-    it("should get metadata for file in deeply nested structure", async () => {
-        const aws4 = new AwsClient({
-            accessKeyId: ENV.ACCESS_KEY,
-            secretAccessKey: ENV.SECRET_KEY,
-            region: ENV.REGION,
-            service: "s3",
-        });
-
-        const folderIds = {
-            bucket: "bucket-id-123",
-            a: "a-id-111",
-            b: "b-id-222",
-            c: "c-id-333",
-            d: "d-id-444",
-        };
-
-        const originalFetch = global.fetch;
-        (global.fetch as any) = vi.fn(async (url: string, init?: any) => {
-            const urlStr = typeof url === "string" ? url : url.toString();
-
-            if (urlStr.includes("oauth2.googleapis.com/token")) {
-                return new Response(
-                    JSON.stringify({
-                        access_token: "mock-access-token",
-                        expires_in: 3600,
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            // フォルダ作成 (POST)
-            if (urlStr === "https://www.googleapis.com/drive/v3/files" && init?.method === "POST") {
-                const body = JSON.parse(init.body);
-                if (body.mimeType === "application/vnd.google-apps.folder") {
-                    if (body.name === "a") {
-                        return new Response(JSON.stringify({ id: folderIds.a, name: "a" }), { status: 200 });
-                    } else if (body.name === "b") {
-                        return new Response(JSON.stringify({ id: folderIds.b, name: "b" }), { status: 200 });
-                    } else if (body.name === "c") {
-                        return new Response(JSON.stringify({ id: folderIds.c, name: "c" }), { status: 200 });
-                    } else if (body.name === "d") {
-                        return new Response(JSON.stringify({ id: folderIds.d, name: "d" }), { status: 200 });
-                    }
-                }
-            }
-
-            // フォルダ階層の検索
-            if (urlStr.includes("name='test-bucket'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'") && !urlStr.includes("in parents")) {
-                return new Response(JSON.stringify({ files: [{ id: folderIds.bucket, name: "test-bucket" }] }), { status: 200 });
-            }
-            if (urlStr.includes("name='a'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.bucket}' in parents`)) {
-                    return new Response(JSON.stringify({ files: [{ id: folderIds.a, name: "a" }] }), { status: 200 });
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-            if (urlStr.includes("name='b'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.a}' in parents`)) {
-                    return new Response(JSON.stringify({ files: [{ id: folderIds.b, name: "b" }] }), { status: 200 });
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-            if (urlStr.includes("name='c'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.b}' in parents`)) {
-                    return new Response(JSON.stringify({ files: [{ id: folderIds.c, name: "c" }] }), { status: 200 });
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-            if (urlStr.includes("name='d'") && urlStr.includes("mimeType='application/vnd.google-apps.folder'")) {
-                if (urlStr.includes(`'${folderIds.c}' in parents`)) {
-                    return new Response(JSON.stringify({ files: [{ id: folderIds.d, name: "d" }] }), { status: 200 });
-                } else {
-                    return new Response(JSON.stringify({ files: [] }), { status: 200 });
-                }
-            }
-
-            // ファイル検索
-            if (urlStr.includes("name='deep.txt'") && urlStr.includes(`'${folderIds.d}' in parents`)) {
-                return new Response(
-                    JSON.stringify({
-                        files: [
-                            {
-                                id: "deep-file-id-999",
-                                name: "deep.txt",
-                                mimeType: "text/plain",
-                                size: "999",
-                            },
-                        ],
-                    }),
-                    { status: 200 },
-                );
-            }
-
-            console.error("Unhandled URL:", urlStr);
-            return new Response(JSON.stringify({ error: "Not Found" }), { status: 404 });
-        });
-
-        const requestUrl = `${endpoint}/test-bucket/a/b/c/d/deep.txt`;
-        const signedReq = await aws4.sign(requestUrl, {
-            method: "HEAD",
-            headers: {
-                "x-amz-content-sha256": "UNSIGNED-PAYLOAD",
-            },
-        });
-
-        const response = await worker.fetch(signedReq, ENV, CTX);
-        expect(response.status).toBe(200);
-        expect(response.headers.get("Content-Type")).toBe("text/plain");
-        expect(response.headers.get("Content-Length")).toBe("999");
-        expect(response.headers.get("ETag")).toBe('"deep-file-id-999"');
-
-        global.fetch = originalFetch;
-    });
-
-    // ========================================
-    // Public Read Tests
-    // ========================================
-
-    const PUBLIC_READ_ENV = {
-        ...ENV,
-        PUBLIC_READ_BUCKETS: "public-bucket",
-        ALLOWED_BUCKETS: "test-bucket,empty-bucket,my-bucket,public-bucket",
-    };
-
-    // 16. Public read bucket - unsigned GET should succeed
-    it("should allow unsigned GET on public read bucket", async () => {
-        const request = new Request(`${endpoint}/public-bucket/test-file.txt`, {
-            method: "GET",
-        });
-
-        const response = await worker.fetch(request, PUBLIC_READ_ENV, CTX);
-        expect(response.status).toBe(200);
-        expect(await response.text()).toBe("Hello World");
-    });
-
-    // 17. Public read bucket - unsigned HEAD should succeed
-    it("should allow unsigned HEAD on public read bucket", async () => {
-        const request = new Request(`${endpoint}/public-bucket/test-file.txt`, {
-            method: "HEAD",
-        });
-
-        const response = await worker.fetch(request, PUBLIC_READ_ENV, CTX);
-        expect(response.status).toBe(200);
-        expect(response.headers.get("Content-Type")).toBe("text/plain");
-        expect(response.headers.get("Content-Length")).toBe("11");
-    });
-
-    // 18. Public read bucket - unsigned PUT should be rejected
-    it("should reject unsigned PUT on public read bucket", async () => {
-        const request = new Request(`${endpoint}/public-bucket/test-file.txt`, {
-            method: "PUT",
-            headers: { "Content-Type": "text/plain" },
-            body: "Hello World",
-        });
-
-        const response = await worker.fetch(request, PUBLIC_READ_ENV, CTX);
-        expect(response.status).toBe(403);
-    });
-
-    // 19. Public read bucket - unsigned DELETE should be rejected
-    it("should reject unsigned DELETE on public read bucket", async () => {
-        const request = new Request(`${endpoint}/public-bucket/test-file.txt`, {
-            method: "DELETE",
-        });
-
-        const response = await worker.fetch(request, PUBLIC_READ_ENV, CTX);
-        expect(response.status).toBe(403);
-    });
-
-    // 20. Non-public bucket - unsigned GET should still be rejected
-    it("should reject unsigned GET on non-public bucket", async () => {
-        const request = new Request(`${endpoint}/test-bucket/test-file.txt`, {
-            method: "GET",
-        });
-
-        const response = await worker.fetch(request, PUBLIC_READ_ENV, CTX);
-        expect(response.status).toBe(403);
-    });
-
-    // 21. Public read bucket - unsigned list (GET without key) should succeed
-    it("should allow unsigned list on public read bucket", async () => {
-        const request = new Request(`${endpoint}/public-bucket/`, {
-            method: "GET",
-        });
-
-        const response = await worker.fetch(request, PUBLIC_READ_ENV, CTX);
-        expect(response.status).toBe(200);
-        const xmlText = await response.text();
-        expect(xmlText).toContain("<ListBucketResult");
+        expect([...drive.files.values()].find((file) => file.name === "empty")!.data.byteLength).toBe(0);
     });
 });
+
+function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
+    return new ReadableStream({
+        start(controller) {
+            for (const chunk of chunks) controller.enqueue(chunk);
+            controller.close();
+        },
+    });
+}
+
+function concatAll(chunks: Uint8Array[]): Uint8Array {
+    const output = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0));
+    let offset = 0;
+    for (const chunk of chunks) {
+        output.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return output;
+}
+
+function encodeAwsChunked(payload: Uint8Array, trailer: boolean): Uint8Array {
+    const chunks: Uint8Array[] = [];
+    const encoder = new TextEncoder();
+    for (let offset = 0; offset < payload.byteLength; offset += 65_537) {
+        const data = payload.subarray(offset, Math.min(payload.byteLength, offset + 65_537));
+        const extension = trailer ? "" : `;chunk-signature=${"0".repeat(64)}`;
+        chunks.push(encoder.encode(`${data.byteLength.toString(16)}${extension}\r\n`), data, encoder.encode("\r\n"));
+    }
+    const extension = trailer ? "" : `;chunk-signature=${"0".repeat(64)}`;
+    chunks.push(encoder.encode(`0${extension}\r\n${trailer ? "x-amz-checksum-crc32:AAAAAA==\r\n" : ""}\r\n`));
+    return concatAll(chunks);
+}

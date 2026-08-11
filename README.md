@@ -70,7 +70,25 @@ https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboa
 | `ALLOWED_BUCKETS` | Set the buckets allowed, separated by `,`. A directory with the bucket name will be created directly under Google Drive. |
 | `PUBLIC_READ_BUCKETS` | *(Optional)* Buckets that allow unauthenticated GET/HEAD access without signature, separated by `,`. Write operations (PUT/POST/DELETE) still require authentication. Must be a subset of `ALLOWED_BUCKETS`. |
 
+### 4. Enable Multipart Uploads
 
-### 4. CORS Configuration
+Large uploads require S3 Multipart Upload because Cloudflare's request-size limit applies before a request reaches the Worker. Multipart support uses one SQLite-backed Durable Object per upload and streams each admitted part directly into one Google Drive resumable session.
+
+After deploying the `MultipartUploadDO` migration, change `ALLOW_MULTIPART` to `"true"` in `wrangler.jsonc`. Recommended AWS CLI settings:
+
+```ini
+[default]
+s3 =
+  multipart_chunksize = 16MB
+  max_concurrent_requests = 3
+request_checksum_calculation = when_required
+```
+
+Multipart parts must use consecutive numbers starting at 1 and are immutable after commit. The completed object's ETag defaults to Google Drive's real MD5 rather than S3's composite multipart ETag; set `ETAG_STYLE` to `"multipart"` only for clients that require the composite form. Existing objects may be re-evaluated once when their old Drive-ID ETag changes to MD5.
+
+Google Drive's free tier has 15 GB total storage, and Google applies a 750 GB daily upload limit.
+
+
+### 5. CORS Configuration
 If you need to configure CORS, set up your own domain for Workers and use Cloudflare's Response Header Transform Rules to add the necessary headers.  
 https://developers.cloudflare.com/rules/transform/response-header-modification/
