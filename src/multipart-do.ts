@@ -57,6 +57,12 @@ export class MultipartUploadDO extends DurableObject<Env> {
         return this.ctx.storage.sql.exec<StateValueRow>("SELECT v FROM state WHERE k = ?", key).toArray()[0]?.v as T | undefined;
     }
 
+    private requiredValue<T extends ArrayBuffer | string | number>(key: string): T {
+        const value = this.getValue<T>(key);
+        if (value === undefined) throw new Error(`Missing multipart upload state: ${key}`);
+        return value;
+    }
+
     private setValue(key: string, value: ArrayBuffer | string | number | null): void {
         this.ctx.storage.sql.exec("INSERT INTO state (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", key, value);
     }
@@ -97,7 +103,7 @@ export class MultipartUploadDO extends DurableObject<Env> {
     private async resyncExpiredLease(inFlight: InFlight, requestId: string, partLen: number): Promise<BeginPartResult | null> {
         if (partLen !== inFlight.partLen) return { kind: "error", code: "InvalidPart", message: "A retried part must have the same decoded length" };
         const accessToken = await getAccessToken(this.env);
-        const actualOffset = await queryStatus(this.getValue<string>("uploadUrl")!, accessToken);
+        const actualOffset = await queryStatus(this.requiredValue<string>("uploadUrl"), accessToken);
         const partStartFileOffset = inFlight.driveOffsetAtStart + inFlight.carryLen;
         let skipBytes = 0;
         if (actualOffset === inFlight.driveOffsetAtStart) {
@@ -129,7 +135,7 @@ export class MultipartUploadDO extends DurableObject<Env> {
             leaseExpiresAt: Date.now() + LEASE_MS,
         };
         this.setValue("inFlight", JSON.stringify(inFlight));
-        return { kind: "admit", uploadUrl: this.getValue<string>("uploadUrl")!, driveOffset, carry, sendLen, skipBytes };
+        return { kind: "admit", uploadUrl: this.requiredValue<string>("uploadUrl"), driveOffset, carry, sendLen, skipBytes };
     }
 
     async beginPart(requestId: string, partNumber: number, partLen: number): Promise<BeginPartResult> {
@@ -229,15 +235,15 @@ export class MultipartUploadDO extends DurableObject<Env> {
             const accessToken = await getAccessToken(this.env);
             let metadata: DriveUploadResult;
             if (total === 0) {
-                await cancelSession(this.getValue<string>("uploadUrl")!, accessToken);
+                await cancelSession(this.requiredValue<string>("uploadUrl"), accessToken);
                 metadata = await createEmptyFile(accessToken, {
-                    name: this.getValue<string>("fileName")!,
-                    parents: [this.getValue<string>("parentFolderId")!],
-                    mimeType: this.getValue<string>("mimeType")!,
+                    name: this.requiredValue<string>("fileName"),
+                    parents: [this.requiredValue<string>("parentFolderId")],
+                    mimeType: this.requiredValue<string>("mimeType"),
                     existingFileId: this.getValue<string>("existingFileId"),
                 });
             } else {
-                metadata = await putFinalChunk(this.getValue<string>("uploadUrl")!, accessToken, driveOffset, total, carry);
+                metadata = await putFinalChunk(this.requiredValue<string>("uploadUrl"), accessToken, driveOffset, total, carry);
             }
             const partEtags = stored.map((part) => part.etag);
             await this.ctx.storage.deleteAlarm();
@@ -259,7 +265,7 @@ export class MultipartUploadDO extends DurableObject<Env> {
     async abort(): Promise<boolean> {
         if (!this.hasUpload()) return false;
         const accessToken = await getAccessToken(this.env);
-        await cancelSession(this.getValue<string>("uploadUrl")!, accessToken);
+        await cancelSession(this.requiredValue<string>("uploadUrl"), accessToken);
         await this.ctx.storage.deleteAlarm();
         await this.ctx.storage.deleteAll();
         for (const waiter of this.waiters.values()) {

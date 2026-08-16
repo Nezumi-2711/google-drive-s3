@@ -12,6 +12,8 @@ export interface Env {
     PUBLIC_READ_BUCKETS?: string;
     ALLOW_MULTIPART?: string;
     ETAG_STYLE?: "md5" | "multipart";
+    CORS_ALLOWED_ORIGINS?: string;
+    ENABLE_DOCS?: string;
 }
 
 export interface GoogleDriveFile {

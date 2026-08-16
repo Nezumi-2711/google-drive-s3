@@ -220,9 +220,10 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
         console.error(await downloadRes.text());
         throw new Error("Download failed");
     }
+    if (!downloadRes.body) throw new Error("Download response had no body");
 
     return {
-        body: downloadRes.body!,
+        body: downloadRes.body,
         contentType: file.mimeType || "application/octet-stream",
         size: parseInt(file.size || "0", 10),
         id: file.id,

@@ -1,4 +1,10 @@
+import type { S3ErrorCode } from "./s3-errors";
 import type { Env } from "./types";
+
+const MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 60 * 60;
+const MAX_CLOCK_SKEW_MS = 15 * 60 * 1000;
+
+export type VerifyResult = { ok: true } | { ok: false; code: S3ErrorCode; message?: string };
 
 function encodeRFC3986(str: string): string {
     return encodeURIComponent(str).replace(/[!'()*]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
@@ -84,8 +90,35 @@ async function createCanonicalRequest(request: Request, isQueryAuth: boolean): P
     return [method, canonicalUri, params, canonicalHeaders, signedHeaders, payloadHash].join("\n");
 }
 
+function parseAmzDate(datetime: string): number | null {
+    const match = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(datetime);
+    if (!match) return null;
+
+    const [, year, month, day, hour, minute, second] = match;
+    const timestamp = Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
+    const parsed = new Date(timestamp);
+    if (parsed.getUTCFullYear() !== Number(year) || parsed.getUTCMonth() !== Number(month) - 1 || parsed.getUTCDate() !== Number(day) || parsed.getUTCHours() !== Number(hour) || parsed.getUTCMinutes() !== Number(minute) || parsed.getUTCSeconds() !== Number(second)) {
+        return null;
+    }
+
+    return timestamp;
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+    if (left.length !== right.length) return false;
+    let mismatch = 0;
+    for (let index = 0; index < left.length; index++) {
+        mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
+    }
+    return mismatch === 0;
+}
+
+function signatureMismatch(): VerifyResult {
+    return { ok: false, code: "SignatureDoesNotMatch" };
+}
+
 /** Verifies an AWS Signature V4 signature carried in either the Authorization header or presigned query params. */
-export async function verifySignature(request: Request, env: Env): Promise<boolean> {
+export async function verifySignature(request: Request, env: Env): Promise<VerifyResult> {
     const url = new URL(request.url);
     const headers = request.headers;
 
@@ -99,15 +132,32 @@ export async function verifySignature(request: Request, env: Env): Promise<boole
         algorithm = authHeader.split(" ")[0];
     }
 
-    if (!algorithm?.includes("AWS4-HMAC-SHA256")) {
-        return false;
+    if (algorithm !== "AWS4-HMAC-SHA256") {
+        return signatureMismatch();
     }
 
     const datetime = (isQueryAuth ? url.searchParams.get("X-Amz-Date") : headers.get("x-amz-date")) ?? "";
+    if (!datetime) return isQueryAuth ? { ok: false, code: "AccessDenied", message: "Request has expired" } : signatureMismatch();
+    const signedAt = parseAmzDate(datetime);
+    if (signedAt === null) return isQueryAuth ? { ok: false, code: "AccessDenied", message: "Request has expired" } : signatureMismatch();
 
-    if (!datetime) return false;
+    if (isQueryAuth) {
+        const expires = url.searchParams.get("X-Amz-Expires");
+        if (!expires || !/^\d+$/.test(expires)) return { ok: false, code: "AccessDenied", message: "Request has expired" };
+        const expiresIn = Number(expires);
+        if (!Number.isSafeInteger(expiresIn) || expiresIn < 1 || expiresIn > MAX_PRESIGN_EXPIRY_SECONDS || Date.now() > signedAt + expiresIn * 1000) {
+            return { ok: false, code: "AccessDenied", message: "Request has expired" };
+        }
+    } else if (Math.abs(Date.now() - signedAt) > MAX_CLOCK_SKEW_MS) {
+        return { ok: false, code: "RequestTimeTooSkewed" };
+    }
 
     const date = datetime.substring(0, 8);
+    const credential = isQueryAuth ? (url.searchParams.get("X-Amz-Credential") ?? "") : (/Credential=([^,\s]+)/.exec(headers.get("Authorization") ?? "")?.[1] ?? "");
+    const credentialParts = credential.split("/");
+    if (credentialParts.length !== 5 || credentialParts[0] !== env.ACCESS_KEY || credentialParts.slice(1).join("/") !== `${date}/${env.REGION}/s3/aws4_request`) {
+        return { ok: false, code: "AccessDenied" };
+    }
 
     const canonicalRequest = await createCanonicalRequest(request, isQueryAuth);
     const hashedCanonicalRequest = await sha256(canonicalRequest);
@@ -124,9 +174,9 @@ export async function verifySignature(request: Request, env: Env): Promise<boole
         expectedSignature = url.searchParams.get("X-Amz-Signature") ?? "";
     } else {
         const authHeader = headers.get("Authorization") ?? "";
-        const match = authHeader.match(/Signature=([a-f0-9]+)/);
+        const match = authHeader.match(/Signature=([a-fA-F0-9]+)/);
         expectedSignature = match ? match[1] : "";
     }
 
-    return signatureHex === expectedSignature;
+    return constantTimeEqual(signatureHex, expectedSignature) ? { ok: true } : signatureMismatch();
 }

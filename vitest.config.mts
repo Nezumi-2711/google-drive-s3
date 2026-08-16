@@ -16,6 +16,8 @@ export default defineConfig({
                     ALLOWED_BUCKETS: "test-bucket,empty-bucket,my-bucket",
                     ALLOW_MULTIPART: "true",
                     ETAG_STYLE: "md5",
+                    CORS_ALLOWED_ORIGINS: "http://localhost:5173",
+                    ENABLE_DOCS: "true",
                 },
             },
         }),

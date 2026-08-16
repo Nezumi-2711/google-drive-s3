@@ -3,6 +3,10 @@ I.R.I.S. (Integrated Reliable Interop Storage)
 
 Use Cloudflare Workers to turn your Google Drive into S3 object storage at no extra cost.
 
+## API documentation
+
+With `ENABLE_DOCS` left enabled (the default), each deployment serves an interactive API reference at `/docs` and the raw OpenAPI 3.1 document at `/openapi.yaml`. Frontend-specific setup, authentication details, limitations, and runnable examples live in [`docs/`](./docs/README.md).
+
 ## About
 This is a Workers script that converts the Google Drive API into an S3-compatible API. Turn your Google Drive into object storage at no extra cost!
 
@@ -74,6 +78,8 @@ https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboa
 | `GOOGLE_CLIENT_ID`,  `GOOGLE_CLIENT_SECRET`,   `GOOGLE_REFRESH_TOKEN` | Google API credentials obtained from rclone. |
 | `ALLOWED_BUCKETS` | Set the buckets allowed, separated by `,`. A directory with the bucket name will be created directly under Google Drive. |
 | `PUBLIC_READ_BUCKETS` | *(Optional)* Buckets that allow unauthenticated GET/HEAD access without signature, separated by `,`. Write operations (PUT/POST/DELETE) still require authentication. Must be a subset of `ALLOWED_BUCKETS`. |
+| `CORS_ALLOWED_ORIGINS` | *(Optional)* Comma-separated exact browser origins, or `*`. Unset emits no CORS headers. |
+| `ENABLE_DOCS` | *(Optional)* Set to `false` to disable `/docs` and `/openapi.yaml`; enabled by default. |
 
 ### 4. Enable Multipart Uploads
 
@@ -95,5 +101,12 @@ Google Drive's free tier has 15 GB total storage, and Google applies a 750 GB da
 
 
 ### 5. CORS Configuration
-If you need to configure CORS, set up your own domain for Workers and use Cloudflare's Response Header Transform Rules to add the necessary headers.  
-https://developers.cloudflare.com/rules/transform/response-header-modification/
+I.R.I.S. provides native, deny-by-default CORS handling. Set `CORS_ALLOWED_ORIGINS` to a comma-separated list of exact origins:
+
+```ini
+CORS_ALLOWED_ORIGINS=https://app.example.com,http://localhost:5173
+```
+
+Use `*` only for a public, credential-free integration. Leave the value unset to emit no CORS headers, preserving CLI-only behavior. Allowed origins receive preflight support for S3 methods and the browser-readable response headers `ETag`, `Content-Range`, `Content-Length`, `Last-Modified`, `Accept-Ranges`, and `x-amz-request-id`. Server-to-server clients do not need CORS: requests without an `Origin` retain their normal S3 response and receive no `Access-Control-*` headers. Exact origin allow-lists add the harmless `Vary: Origin` response header for cache correctness.
+
+For browser uploads, keep `SECRET_KEY` in a BFF and give the browser short-lived presigned URLs. See the [frontend integration guide](./docs/integration-guide.md).

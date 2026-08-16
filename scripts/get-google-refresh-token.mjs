@@ -20,9 +20,9 @@
 // Optional: --port 8976 (must not be in use; Desktop-app clients accept any
 // loopback port automatically, no need to register it in Google Cloud Console).
 
+import { exec } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import { exec } from "node:child_process";
 import { URL } from "node:url";
 
 const SCOPE = "https://www.googleapis.com/auth/drive";
@@ -137,10 +137,7 @@ async function main() {
         process.exit(1);
     }
     if (!tokenData.refresh_token) {
-        console.error(
-            "No refresh_token was returned. This usually means the account already has an active grant.\n" +
-                "Revoke it at https://myaccount.google.com/permissions and re-run this script.",
-        );
+        console.error("No refresh_token was returned. This usually means the account already has an active grant.\n" + "Revoke it at https://myaccount.google.com/permissions and re-run this script.");
         process.exit(1);
     }
 

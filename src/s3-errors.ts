@@ -1,10 +1,11 @@
 import { escapeXml } from "./s3-xml";
 
-export type S3ErrorCode = "AccessDenied" | "SignatureDoesNotMatch" | "NoSuchKey" | "NoSuchUpload" | "InvalidPart" | "InvalidPartOrder" | "EntityTooLarge" | "MalformedXML" | "InvalidArgument" | "MethodNotAllowed" | "NotImplemented" | "SlowDown" | "InternalError";
+export type S3ErrorCode = "AccessDenied" | "SignatureDoesNotMatch" | "RequestTimeTooSkewed" | "NoSuchKey" | "NoSuchUpload" | "InvalidPart" | "InvalidPartOrder" | "EntityTooLarge" | "MalformedXML" | "InvalidArgument" | "MethodNotAllowed" | "NotImplemented" | "SlowDown" | "InternalError";
 
 const DEFAULT_MESSAGES: Record<S3ErrorCode, string> = {
     AccessDenied: "Access Denied",
     SignatureDoesNotMatch: "The request signature we calculated does not match the signature you provided.",
+    RequestTimeTooSkewed: "The difference between the request time and the server's time is too large.",
     NoSuchKey: "The specified key does not exist.",
     NoSuchUpload: "The specified multipart upload does not exist.",
     InvalidPart: "One or more of the specified parts could not be found.",

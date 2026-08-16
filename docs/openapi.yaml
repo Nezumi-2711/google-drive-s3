@@ -1,0 +1,391 @@
+openapi: 3.1.0
+info:
+  title: I.R.I.S. Google Drive S3 API
+  version: 1.0.0
+  description: |
+    An intentionally small S3-compatible object-storage API backed by Google Drive.
+    Authenticate every non-public request with AWS Signature Version 4. Browser clients
+    should receive short-lived presigned URLs from a backend-for-frontend, never credentials.
+servers:
+  - url: https://{worker-host}
+    variables:
+      worker-host:
+        default: your-worker.example.workers.dev
+security:
+  - sigv4: []
+tags:
+  - name: Objects
+  - name: Buckets
+  - name: Multipart uploads
+paths:
+  /{bucket}:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+    get:
+      tags: [Buckets]
+      operationId: listObjects
+      summary: List objects in a bucket
+      description: List objects recursively, or use `delimiter=/` to return immediate folders as `CommonPrefixes`.
+      parameters:
+        - $ref: '#/components/parameters/Prefix'
+        - $ref: '#/components/parameters/Delimiter'
+      responses:
+        '200':
+          description: Object listing.
+          content:
+            application/xml:
+              schema: { $ref: '#/components/schemas/ListBucketResult' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+    head:
+      tags: [Buckets]
+      operationId: headBucket
+      summary: Check bucket access
+      responses:
+        '200': { description: The bucket is configured and accessible. }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
+  /{bucket}?uploads:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+    get:
+      tags: [Multipart uploads]
+      operationId: listMultipartUploads
+      summary: List multipart uploads
+      description: Always returns an empty list; active multipart uploads cannot be enumerated.
+      responses:
+        '200':
+          description: Empty multipart upload listing.
+          content:
+            application/xml:
+              schema: { $ref: '#/components/schemas/ListMultipartUploadsResult' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+  /{bucket}/{key}:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+      - $ref: '#/components/parameters/Key'
+    put:
+      tags: [Objects]
+      operationId: putObject
+      summary: Create or replace an object
+      parameters:
+        - $ref: '#/components/parameters/ContentType'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+          '*/*':
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Object uploaded.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '501': { $ref: '#/components/responses/NotImplemented' }
+    get:
+      tags: [Objects]
+      operationId: getObject
+      summary: Download an object
+      parameters:
+        - name: Range
+          in: header
+          schema: { type: string, example: bytes=0-1023 }
+      responses:
+        '200':
+          description: Full object data.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Content-Length: { $ref: '#/components/headers/ContentLength' }
+            Last-Modified: { $ref: '#/components/headers/LastModified' }
+            Accept-Ranges: { schema: { type: string, example: bytes } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '206':
+          description: Requested byte range.
+          headers:
+            Content-Range: { schema: { type: string, example: bytes 0-1023/4096 } }
+            Content-Length: { $ref: '#/components/headers/ContentLength' }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchKey' }
+    head:
+      tags: [Objects]
+      operationId: headObject
+      summary: Get object metadata
+      responses:
+        '200':
+          description: Object metadata in headers.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+            Content-Length: { $ref: '#/components/headers/ContentLength' }
+            Last-Modified: { $ref: '#/components/headers/LastModified' }
+            Accept-Ranges: { schema: { type: string, example: bytes } }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchKey' }
+    delete:
+      tags: [Objects]
+      operationId: deleteObject
+      summary: Delete an object
+      responses:
+        '204': { description: Object deleted. }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchKey' }
+  /{bucket}/{key}?uploads:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+      - $ref: '#/components/parameters/Key'
+    post:
+      tags: [Multipart uploads]
+      operationId: createMultipartUpload
+      summary: Initiate a multipart upload
+      parameters:
+        - $ref: '#/components/parameters/ContentType'
+      responses:
+        '200':
+          description: Upload initiated.
+          content:
+            application/xml:
+              schema: { $ref: '#/components/schemas/InitiateMultipartUploadResult' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '501': { $ref: '#/components/responses/NotImplemented' }
+  /{bucket}/{key}?uploadId={uploadId}&partNumber={partNumber}:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+      - $ref: '#/components/parameters/Key'
+      - $ref: '#/components/parameters/UploadId'
+      - $ref: '#/components/parameters/PartNumber'
+    put:
+      tags: [Multipart uploads]
+      operationId: uploadPart
+      summary: Upload one multipart part
+      description: Parts must arrive strictly sequentially beginning with part number 1.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '200':
+          description: Part accepted.
+          headers:
+            ETag: { $ref: '#/components/headers/ETag' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchUpload' }
+        '503': { $ref: '#/components/responses/SlowDown' }
+  /{bucket}/{key}?uploadId={uploadId}:
+    parameters:
+      - $ref: '#/components/parameters/Bucket'
+      - $ref: '#/components/parameters/Key'
+      - $ref: '#/components/parameters/UploadId'
+    post:
+      tags: [Multipart uploads]
+      operationId: completeMultipartUpload
+      summary: Complete a multipart upload
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema: { $ref: '#/components/schemas/CompleteMultipartUpload' }
+      responses:
+        '200':
+          description: Upload completed.
+          content:
+            application/xml:
+              schema: { $ref: '#/components/schemas/CompleteMultipartUploadResult' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchUpload' }
+    get:
+      tags: [Multipart uploads]
+      operationId: listParts
+      summary: List uploaded parts
+      parameters:
+        - name: part-number-marker
+          in: query
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: max-parts
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 1000 }
+      responses:
+        '200':
+          description: Current part list.
+          content:
+            application/xml:
+              schema: { $ref: '#/components/schemas/ListPartsResult' }
+        '400': { $ref: '#/components/responses/InvalidArgument' }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchUpload' }
+    delete:
+      tags: [Multipart uploads]
+      operationId: abortMultipartUpload
+      summary: Abort a multipart upload
+      responses:
+        '204': { description: Upload aborted. }
+        '403': { $ref: '#/components/responses/AccessDenied' }
+        '404': { $ref: '#/components/responses/NoSuchUpload' }
+components:
+  securitySchemes:
+    sigv4:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: AWS Signature Version 4 header authentication or equivalent `X-Amz-*` presigned query parameters.
+  parameters:
+    Bucket:
+      name: bucket
+      in: path
+      required: true
+      schema: { type: string }
+    Key:
+      name: key
+      in: path
+      required: true
+      schema: { type: string }
+    Prefix:
+      name: prefix
+      in: query
+      schema: { type: string, default: '' }
+    Delimiter:
+      name: delimiter
+      in: query
+      schema: { type: string, example: / }
+    UploadId:
+      name: uploadId
+      in: query
+      required: true
+      schema: { type: string }
+    PartNumber:
+      name: partNumber
+      in: query
+      required: true
+      schema: { type: integer, minimum: 1, maximum: 10000 }
+    ContentType:
+      name: Content-Type
+      in: header
+      schema: { type: string, example: application/octet-stream }
+  headers:
+    ETag:
+      schema: { type: string, example: '"d41d8cd98f00b204e9800998ecf8427e"' }
+    ContentLength:
+      schema: { type: integer, minimum: 0 }
+    LastModified:
+      schema: { type: string, format: date-time }
+  responses:
+    AccessDenied:
+      description: Authentication failed, the access key is not recognized, the presigned URL expired, or bucket access is denied.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+    NoSuchKey:
+      description: The object does not exist.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+    NoSuchUpload:
+      description: The multipart upload does not exist.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+    InvalidArgument:
+      description: A required parameter or body is invalid.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+    NotImplemented:
+      description: This S3 operation is not supported.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+    SlowDown:
+      description: Parts are out of sequence or the upload is busy; retry later.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+    MethodNotAllowed:
+      description: The method/path combination is unsupported.
+      content: { application/xml: { schema: { $ref: '#/components/schemas/S3Error' } } }
+  schemas:
+    S3Error:
+      type: object
+      xml: { name: Error }
+      required: [Code, Message, RequestId]
+      properties:
+        Code: { type: string, xml: { name: Code } }
+        Message: { type: string, xml: { name: Message } }
+        Resource: { type: string, xml: { name: Resource } }
+        RequestId: { type: string, xml: { name: RequestId } }
+    Object:
+      type: object
+      xml: { name: Contents }
+      properties:
+        Key: { type: string }
+        LastModified: { type: string, format: date-time }
+        ETag: { type: string }
+        Size: { type: integer }
+        StorageClass: { type: string, example: STANDARD }
+    ListBucketResult:
+      type: object
+      xml: { name: ListBucketResult, namespace: 'http://s3.amazonaws.com/doc/2006-03-01/' }
+      properties:
+        Name: { type: string }
+        Prefix: { type: string }
+        Delimiter: { type: string }
+        MaxKeys: { type: integer, example: 1000 }
+        IsTruncated: { type: boolean }
+        Contents: { type: array, items: { $ref: '#/components/schemas/Object' }, xml: { wrapped: false } }
+    InitiateMultipartUploadResult:
+      type: object
+      xml: { name: InitiateMultipartUploadResult, namespace: 'http://s3.amazonaws.com/doc/2006-03-01/' }
+      required: [Bucket, Key, UploadId]
+      properties:
+        Bucket: { type: string }
+        Key: { type: string }
+        UploadId: { type: string }
+    CompleteMultipartUpload:
+      type: object
+      xml: { name: CompleteMultipartUpload }
+      required: [Part]
+      properties:
+        Part:
+          type: array
+          minItems: 1
+          xml: { wrapped: false }
+          items:
+            type: object
+            xml: { name: Part }
+            required: [PartNumber, ETag]
+            properties:
+              PartNumber: { type: integer }
+              ETag: { type: string }
+    CompleteMultipartUploadResult:
+      type: object
+      xml: { name: CompleteMultipartUploadResult, namespace: 'http://s3.amazonaws.com/doc/2006-03-01/' }
+      properties:
+        Location: { type: string }
+        Bucket: { type: string }
+        Key: { type: string }
+        ETag: { type: string }
+    ListPartsResult:
+      type: object
+      xml: { name: ListPartsResult, namespace: 'http://s3.amazonaws.com/doc/2006-03-01/' }
+      properties:
+        Bucket: { type: string }
+        Key: { type: string }
+        UploadId: { type: string }
+        NextPartNumberMarker: { type: integer }
+        IsTruncated: { type: boolean }
+        Part:
+          type: array
+          xml: { wrapped: false }
+          items:
+            type: object
+            properties:
+              PartNumber: { type: integer }
+              LastModified: { type: string, format: date-time }
+              ETag: { type: string }
+              Size: { type: integer }
+    ListMultipartUploadsResult:
+      type: object
+      xml: { name: ListMultipartUploadsResult, namespace: 'http://s3.amazonaws.com/doc/2006-03-01/' }
+      properties:
+        Bucket: { type: string }
+        KeyMarker: { type: string }
+        UploadIdMarker: { type: string }
+        NextKeyMarker: { type: string }
+        NextUploadIdMarker: { type: string }
+        MaxUploads: { type: integer, example: 1000 }
+        IsTruncated: { type: boolean, example: false }

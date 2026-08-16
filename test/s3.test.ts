@@ -56,7 +56,9 @@ class FakeDrive {
         if (url.pathname === "/drive/v3/files" && request.method === "POST") return this.createMetadata(await request.json<Record<string, unknown>>());
         if (url.pathname.startsWith("/drive/v3/files/") && url.searchParams.get("alt") === "media") return this.download(url, request);
         if (url.pathname.startsWith("/drive/v3/files/") && request.method === "DELETE") {
-            this.files.delete(url.pathname.split("/").at(-1)!);
+            const fileId = url.pathname.split("/").at(-1);
+            if (!fileId) return new Response("Not Found", { status: 404 });
+            this.files.delete(fileId);
             return new Response(null, { status: 204 });
         }
         if (url.pathname.startsWith("/upload/drive/v3/files") && url.searchParams.get("uploadType") === "resumable") return this.initialize(url, request);
@@ -121,7 +123,8 @@ class FakeDrive {
     }
 
     private async upload(url: URL, request: Request): Promise<Response> {
-        const id = url.pathname.split("/").at(-1)!;
+        const id = url.pathname.split("/").at(-1);
+        if (!id) return new Response(null, { status: 404 });
         const session = this.sessions.get(id);
         if (!session) return new Response(null, { status: 404 });
         if (request.method === "DELETE") {
@@ -159,7 +162,9 @@ class FakeDrive {
     }
 
     private download(url: URL, request: Request): Response {
-        const file = this.files.get(url.pathname.split("/").at(-1)!);
+        const fileId = url.pathname.split("/").at(-1);
+        if (!fileId) return new Response(null, { status: 404 });
+        const file = this.files.get(fileId);
         if (!file) return new Response(null, { status: 404 });
         const range = request.headers.get("Range");
         if (!range) return new Response(file.data, { headers: { "Content-Length": String(file.data.byteLength) } });
@@ -204,6 +209,18 @@ async function signed(path: string, init: RequestInit): Promise<Request> {
     });
 }
 
+async function presigned(path: string, init: RequestInit, options: { datetime?: string; accessKeyId?: string; expires?: string } = {}): Promise<Request> {
+    const url = new URL(`${ENDPOINT}${path}`);
+    url.searchParams.set("X-Amz-Expires", options.expires ?? "60");
+    const aws = new AwsClient({ accessKeyId: options.accessKeyId ?? ENV.ACCESS_KEY, secretAccessKey: ENV.SECRET_KEY, region: ENV.REGION, service: "s3" });
+    const bodyLength = typeof init.body === "string" ? new TextEncoder().encode(init.body).byteLength : init.body instanceof Uint8Array ? init.body.byteLength : undefined;
+    return aws.sign(url.toString(), {
+        ...init,
+        headers: { "x-amz-content-sha256": "UNSIGNED-PAYLOAD", ...(bodyLength === undefined ? {} : { "x-amz-decoded-content-length": String(bodyLength) }), ...init.headers },
+        aws: { signQuery: true, ...(options.datetime ? { datetime: options.datetime } : {}) },
+    });
+}
+
 let drive: FakeDrive;
 
 beforeEach(async () => {
@@ -226,7 +243,10 @@ describe("S3 compatibility", () => {
         const second = await worker.fetch(await signed("/test-bucket/file.txt", { method: "PUT", body: "second" }), ENV, CTX);
         expect(second.status).toBe(200);
         expect([...drive.files.values()].filter((file) => file.name === "file.txt")).toHaveLength(1);
-        expect(new TextDecoder().decode([...drive.files.values()].find((file) => file.name === "file.txt")!.data)).toBe("second");
+        const stored = [...drive.files.values()].find((file) => file.name === "file.txt");
+        expect(stored).toBeDefined();
+        if (!stored) throw new Error("Overwritten object was not stored");
+        expect(new TextDecoder().decode(stored.data)).toBe("second");
     });
 
     it("sets Last-Modified on GET and HEAD from Drive's modifiedTime", async () => {
@@ -264,6 +284,33 @@ describe("S3 compatibility", () => {
         expect(response.status).toBe(200);
     });
 
+    it("rejects expired presigned URLs and accepts unexpired ones", async () => {
+        const expired = await worker.fetch(await presigned("/test-bucket/file.txt", { method: "GET" }, { datetime: "20200101T000000Z", expires: "60" }), ENV, CTX);
+        expect(expired.status).toBe(403);
+        expect(await expired.text()).toContain("<Code>AccessDenied</Code>");
+    });
+
+    it("accepts an unexpired presigned URL", async () => {
+        await worker.fetch(await signed("/test-bucket/presigned.txt", { method: "PUT", body: "hello" }), ENV, CTX);
+        const response = await worker.fetch(await presigned("/test-bucket/presigned.txt", { method: "GET" }), ENV, CTX);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("hello");
+    });
+
+    it("rejects a Credential access key that does not match ACCESS_KEY", async () => {
+        const response = await worker.fetch(await presigned("/test-bucket/file.txt", { method: "GET" }, { accessKeyId: "unexpected-access-key" }), ENV, CTX);
+        expect(response.status).toBe(403);
+        expect(await response.text()).toContain("<Code>AccessDenied</Code>");
+    });
+
+    it("rejects header-authenticated requests outside the 15-minute clock skew", async () => {
+        const aws = new AwsClient({ accessKeyId: ENV.ACCESS_KEY, secretAccessKey: ENV.SECRET_KEY, region: ENV.REGION, service: "s3" });
+        const request = await aws.sign(`${ENDPOINT}/test-bucket/file.txt`, { method: "GET", aws: { datetime: "20200101T000000Z" } });
+        const response = await worker.fetch(request, ENV, CTX);
+        expect(response.status).toBe(403);
+        expect(await response.text()).toContain("<Code>RequestTimeTooSkewed</Code>");
+    });
+
     it("decodes both aws-chunked framing variants across arbitrary boundaries", async () => {
         const payload = bytes(70_013);
         for (const trailer of [true, false]) {
@@ -282,20 +329,28 @@ describe("S3 compatibility", () => {
         const source = bytes(1_500_123);
         const create = await worker.fetch(await signed("/test-bucket/big.bin?uploads", { method: "POST", headers: { "Content-Type": "application/octet-stream" } }), ENV, CTX);
         expect(create.status).toBe(200);
-        const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(await create.text())![1];
+        const uploadId = /<UploadId>([^<]+)<\/UploadId>/.exec(await create.text())?.[1];
+        expect(uploadId).toBeDefined();
+        if (!uploadId) throw new Error("Multipart initiation did not return an upload ID");
         const completed: Array<{ partNumber: number; etag: string }> = [];
         for (let index = 0, offset = 0; offset < source.byteLength; index++) {
             const end = Math.min(source.byteLength, offset + 500_000);
             const part = await worker.fetch(await signed(`/test-bucket/big.bin?partNumber=${index + 1}&uploadId=${encodeURIComponent(uploadId)}`, { method: "PUT", body: source.slice(offset, end) }), ENV, CTX);
             expect(part.status).toBe(200);
-            completed.push({ partNumber: index + 1, etag: part.headers.get("ETag")!.replaceAll('"', "") });
+            const partEtag = part.headers.get("ETag");
+            expect(partEtag).toBeDefined();
+            if (!partEtag) throw new Error(`Multipart part ${index + 1} did not return an ETag`);
+            completed.push({ partNumber: index + 1, etag: partEtag.replaceAll('"', "") });
             offset = end;
         }
         const xml = `<CompleteMultipartUpload>${completed.map((part) => `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>"${part.etag}"</ETag></Part>`).join("")}</CompleteMultipartUpload>`;
         const result = await worker.fetch(await signed(`/test-bucket/big.bin?uploadId=${encodeURIComponent(uploadId)}`, { method: "POST", body: xml }), ENV, CTX);
         expect(result.status).toBe(200);
         expect(await result.text()).toMatch(/<ETag>"[0-9a-f]{32}"<\/ETag>/);
-        const stored = [...drive.files.values()].find((file) => file.name === "big.bin")!.data;
+        const storedFile = [...drive.files.values()].find((file) => file.name === "big.bin");
+        expect(storedFile).toBeDefined();
+        if (!storedFile) throw new Error("Completed multipart object was not stored");
+        const stored = storedFile.data;
         expect(stored.byteLength).toBe(source.byteLength);
         expect(fakeMd5(stored)).toBe(fakeMd5(source));
     });
@@ -317,13 +372,13 @@ describe("S3 compatibility", () => {
             CTX,
         );
         expect(response.status).toBe(200);
-        expect([...drive.files.values()].find((file) => file.name === "chunked.bin")!.data).toEqual(source);
+        expect([...drive.files.values()].find((file) => file.name === "chunked.bin")?.data).toEqual(source);
     });
 
     it("supports an empty PutObject", async () => {
         const response = await worker.fetch(await signed("/test-bucket/empty", { method: "PUT", body: new Uint8Array() }), ENV, CTX);
         expect(response.status).toBe(200);
-        expect([...drive.files.values()].find((file) => file.name === "empty")!.data.byteLength).toBe(0);
+        expect([...drive.files.values()].find((file) => file.name === "empty")?.data.byteLength).toBe(0);
     });
 
     it("lists nested keys under a prefix, as CommonPrefixes with a delimiter and recursively without one", async () => {
