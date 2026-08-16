@@ -41,6 +41,7 @@ export interface DriveDownloadResult {
     size: number;
     id: string;
     md5Checksum?: string;
+    modifiedTime?: string;
     status: number;
     contentRange?: string;
     contentLength?: string;
@@ -51,4 +52,5 @@ export interface DriveFileMetadata {
     mimeType: string;
     size: number;
     md5Checksum?: string;
+    modifiedTime?: string;
 }

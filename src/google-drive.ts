@@ -11,7 +11,7 @@ interface GoogleDriveCreateResponse {
     id: string;
 }
 
-const DRIVE_FIELDS = "id,name,size,mimeType,md5Checksum";
+const DRIVE_FIELDS = "id,name,size,mimeType,md5Checksum,modifiedTime";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const LIST_NODE_CAP = 5000;
 
@@ -227,6 +227,7 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
         size: parseInt(file.size || "0", 10),
         id: file.id,
         md5Checksum: file.md5Checksum,
+        modifiedTime: file.modifiedTime,
         status: downloadRes.status,
         contentRange: downloadRes.headers.get("Content-Range") ?? undefined,
         contentLength: downloadRes.headers.get("Content-Length") ?? undefined,
@@ -264,6 +265,7 @@ export async function getFileMetadata(accessToken: string, bucket: string, objec
         mimeType: file.mimeType || "application/octet-stream",
         size: parseInt(file.size || "0", 10),
         md5Checksum: file.md5Checksum,
+        modifiedTime: file.modifiedTime,
     };
 }
 

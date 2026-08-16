@@ -207,6 +207,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
                 ETag: `"${etag(file)}"`,
             });
             if (file.contentRange) headers.set("Content-Range", file.contentRange);
+            if (file.modifiedTime) headers.set("Last-Modified", new Date(file.modifiedTime).toUTCString());
             return new Response(file.body, { status: file.status, headers });
         } catch (error) {
             if (error instanceof Error && error.message === "File not found") return s3Error("NoSuchKey", 404, undefined, resource);
@@ -218,10 +219,9 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
         if (!key) return new Response(null, { status: 200 });
         try {
             const metadata = await getFileMetadata(accessToken, bucket, key, env);
-            return new Response(null, {
-                status: 200,
-                headers: { "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Accept-Ranges": "bytes", ETag: `"${etag(metadata)}"` },
-            });
+            const headers = new Headers({ "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Accept-Ranges": "bytes", ETag: `"${etag(metadata)}"` });
+            if (metadata.modifiedTime) headers.set("Last-Modified", new Date(metadata.modifiedTime).toUTCString());
+            return new Response(null, { status: 200, headers });
         } catch (error) {
             if (error instanceof Error && error.message === "File not found") return s3Error("NoSuchKey", 404, undefined, resource, true);
             throw error;

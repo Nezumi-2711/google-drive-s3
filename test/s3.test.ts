@@ -18,7 +18,10 @@ interface StoredFile {
     mimeType: string;
     data: Uint8Array;
     md5Checksum: string;
+    modifiedTime: string;
 }
+
+const FAKE_MODIFIED_TIME = "2026-08-16T08:00:00.000Z";
 
 interface StoredFolder {
     id: string;
@@ -95,6 +98,7 @@ class FakeDrive {
             mimeType,
             data: new Uint8Array(),
             md5Checksum: "d41d8cd98f00b204e9800998ecf8427e",
+            modifiedTime: FAKE_MODIFIED_TIME,
         };
         this.files.set(id, file);
         return Response.json({ ...file, size: "0", data: undefined });
@@ -148,7 +152,7 @@ class FakeDrive {
 
     private finalize(session: UploadSession, data: Uint8Array): Response {
         const id = session.fileId ?? `file-${this.nextId++}`;
-        const file: StoredFile = { id, name: session.name, parent: session.parent, mimeType: session.mimeType, data, md5Checksum: fakeMd5(data) };
+        const file: StoredFile = { id, name: session.name, parent: session.parent, mimeType: session.mimeType, data, md5Checksum: fakeMd5(data), modifiedTime: FAKE_MODIFIED_TIME };
         this.files.set(id, file);
         this.sessions.delete(session.id);
         return Response.json({ ...file, size: String(data.byteLength), data: undefined });
@@ -223,6 +227,18 @@ describe("S3 compatibility", () => {
         expect(second.status).toBe(200);
         expect([...drive.files.values()].filter((file) => file.name === "file.txt")).toHaveLength(1);
         expect(new TextDecoder().decode([...drive.files.values()].find((file) => file.name === "file.txt")!.data)).toBe("second");
+    });
+
+    it("sets Last-Modified on GET and HEAD from Drive's modifiedTime", async () => {
+        await worker.fetch(await signed("/test-bucket/dated.txt", { method: "PUT", body: "hi" }), ENV, CTX);
+
+        const expected = new Date(FAKE_MODIFIED_TIME).toUTCString();
+
+        const get = await worker.fetch(await signed("/test-bucket/dated.txt", { method: "GET" }), ENV, CTX);
+        expect(get.headers.get("Last-Modified")).toBe(expected);
+
+        const head = await worker.fetch(await signed("/test-bucket/dated.txt", { method: "HEAD" }), ENV, CTX);
+        expect(head.headers.get("Last-Modified")).toBe(expected);
     });
 
     it("forwards Range and returns a standard XML NoSuchKey", async () => {
