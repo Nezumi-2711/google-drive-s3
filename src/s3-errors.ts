@@ -36,5 +36,6 @@ export function s3Error(code: S3ErrorCode, status: number, message = DEFAULT_MES
     const responseHeaders = new Headers(headers);
     responseHeaders.set("Content-Type", "application/xml");
     responseHeaders.set("x-amz-request-id", requestId);
+    responseHeaders.set("Cache-Control", "no-transform");
     return new Response(body, { status, headers: responseHeaders });
 }

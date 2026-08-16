@@ -12,7 +12,7 @@ function etag(file: { id: string; md5Checksum?: string }): string {
 }
 
 function xmlResponse(body: string, status = 200): Response {
-    return new Response(body, { status, headers: { "Content-Type": "application/xml" } });
+    return new Response(body, { status, headers: { "Content-Type": "application/xml", "Cache-Control": "no-transform" } });
 }
 
 function multipartStub(env: Env, uploadId: string) {
@@ -202,7 +202,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
             const headers = new Headers({
                 "Content-Type": file.contentType,
                 "Content-Length": file.contentLength ?? file.size.toString(),
-                "Cache-Control": "s-maxage=300, no-store",
+                "Cache-Control": "s-maxage=300, no-store, no-transform",
                 "Accept-Ranges": "bytes",
                 ETag: `"${etag(file)}"`,
             });
@@ -219,7 +219,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
         if (!key) return new Response(null, { status: 200 });
         try {
             const metadata = await getFileMetadata(accessToken, bucket, key, env);
-            const headers = new Headers({ "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Accept-Ranges": "bytes", ETag: `"${etag(metadata)}"` });
+            const headers = new Headers({ "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Cache-Control": "no-transform", "Accept-Ranges": "bytes", ETag: `"${etag(metadata)}"` });
             if (metadata.modifiedTime) headers.set("Last-Modified", new Date(metadata.modifiedTime).toUTCString());
             return new Response(null, { status: 200, headers });
         } catch (error) {

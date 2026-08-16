@@ -34,6 +34,26 @@ async function getSigningKey(secret: string, date: string, region: string, servi
     return await hmacSha256(kService, "aws4_request");
 }
 
+/**
+ * aws-sdk-go-v2 (used by rclone/AWS CLI v2) signs Accept-Encoding as "gzip" specifically for
+ * GetObject — it wants a compressed transfer of the object body — but as "identity" for every
+ * other operation (HeadObject, ListObjectsV2, PutObject, multipart list/parts), since those
+ * don't return arbitrary object data. Confirmed by capturing rclone's own raw outgoing requests:
+ * HEAD and GET-without-key send "identity"; GET-with-key (GetObject) sends "gzip". Cloudflare's
+ * edge always rewrites the incoming header before the Worker sees it, so the literal value can
+ * never be read back — this replicates what the client actually signed instead.
+ *
+ * This is a best-effort fallback: some proxies between the client and this Worker (including
+ * Cloudflare's own edge) can still rewrite Accept-Encoding in ways clients don't anticipate,
+ * which is why rclone/aws-sdk-go-v2 also expose `--s3-sign-accept-encoding=false` to drop this
+ * header from what's signed entirely — see the "Accept-Encoding" note in the README.
+ */
+function isGetObjectRequest(method: string, url: URL): boolean {
+    if (method !== "GET") return false;
+    if (url.searchParams.has("uploadId") || url.searchParams.has("uploads")) return false;
+    return url.pathname.split("/").filter(Boolean).length > 1;
+}
+
 async function createCanonicalRequest(request: Request, isQueryAuth: boolean): Promise<string> {
     const url = new URL(request.url);
 
@@ -41,6 +61,7 @@ async function createCanonicalRequest(request: Request, isQueryAuth: boolean): P
     const canonicalUri = url.pathname || "/";
 
     const params = Array.from(url.searchParams.entries())
+        // "X-Amz-Signature" is stripped from presigned URLs since it's the signature itself.
         .filter(([key]) => key !== "X-Amz-Signature")
         .sort(([a], [b]) => {
             if (a < b) return -1;
@@ -71,11 +92,7 @@ async function createCanonicalRequest(request: Request, isQueryAuth: boolean): P
                     headerValue += `:${port}`;
                 }
             } else if (headerName === "accept-encoding") {
-                // Cloudflare's edge rewrites the incoming Accept-Encoding value before the Worker
-                // sees it, so the literal value can never be recovered here. S3 SDKs that sign this
-                // header (aws-sdk-go, used by rclone/mc) always set it to "identity" beforehand, since
-                // S3 doesn't support transparent content-encoding on object bodies.
-                headerValue = "identity";
+                headerValue = isGetObjectRequest(method, url) ? "gzip" : "identity";
             } else {
                 headerValue = request.headers.get(headerName)?.trim() ?? "";
             }

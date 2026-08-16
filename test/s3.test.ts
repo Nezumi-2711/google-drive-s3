@@ -274,7 +274,7 @@ describe("S3 compatibility", () => {
         expect(await missing.text()).toContain("<Code>NoSuchKey</Code>");
     });
 
-    it("verifies signatures that include Accept-Encoding even when the delivered value differs (Cloudflare rewrites it in transit)", async () => {
+    it("verifies PUT signatures with Accept-Encoding: identity even when Cloudflare rewrites the delivered value", async () => {
         const original = await signed("/test-bucket/ae.txt", { method: "PUT", body: "hello", headers: { "accept-encoding": "identity" } });
         const rewrittenHeaders = new Headers(original.headers);
         rewrittenHeaders.set("accept-encoding", "gzip, deflate, br");
@@ -282,6 +282,28 @@ describe("S3 compatibility", () => {
 
         const response = await worker.fetch(mutated, ENV, CTX);
         expect(response.status).toBe(200);
+    });
+
+    it("verifies GetObject signatures with Accept-Encoding: gzip (aws-sdk-go-v2/rclone signs gzip only for GetObject, identity elsewhere)", async () => {
+        await worker.fetch(await signed("/test-bucket/ae-get.txt", { method: "PUT", body: "hello" }), ENV, CTX);
+        const original = await signed("/test-bucket/ae-get.txt", { method: "GET", headers: { "accept-encoding": "gzip" } });
+        const rewrittenHeaders = new Headers(original.headers);
+        rewrittenHeaders.set("accept-encoding", "gzip, br");
+        const mutated = new Request(original, { headers: rewrittenHeaders });
+
+        const response = await worker.fetch(mutated, ENV, CTX);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("hello");
+    });
+
+    it("verifies signatures for requests carrying the aws-sdk-go x-id tracing param (rclone/AWS CLI v2 GetObject)", async () => {
+        // aws-sdk-go-v2 (used by rclone) signs the x-id param as part of the request by default
+        // (opt.UseXID defaults to true) — it's part of the canonical query string, not appended
+        // afterward. Confirmed against rclone's own request dumps.
+        await worker.fetch(await signed("/test-bucket/getid.txt", { method: "PUT", body: "hello" }), ENV, CTX);
+        const response = await worker.fetch(await signed("/test-bucket/getid.txt?x-id=GetObject", { method: "GET" }), ENV, CTX);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("hello");
     });
 
     it("rejects expired presigned URLs and accepts unexpired ones", async () => {
