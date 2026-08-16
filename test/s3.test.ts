@@ -215,6 +215,16 @@ describe("S3 compatibility", () => {
         expect(await missing.text()).toContain("<Code>NoSuchKey</Code>");
     });
 
+    it("verifies signatures that include Accept-Encoding even when the delivered value differs (Cloudflare rewrites it in transit)", async () => {
+        const original = await signed("/test-bucket/ae.txt", { method: "PUT", body: "hello", headers: { "accept-encoding": "identity" } });
+        const rewrittenHeaders = new Headers(original.headers);
+        rewrittenHeaders.set("accept-encoding", "gzip, deflate, br");
+        const mutated = new Request(original, { headers: rewrittenHeaders });
+
+        const response = await worker.fetch(mutated, ENV, CTX);
+        expect(response.status).toBe(200);
+    });
+
     it("decodes both aws-chunked framing variants across arbitrary boundaries", async () => {
         const payload = bytes(70_013);
         for (const trailer of [true, false]) {

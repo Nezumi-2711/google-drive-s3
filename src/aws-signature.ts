@@ -64,6 +64,12 @@ async function createCanonicalRequest(request: Request, isQueryAuth: boolean): P
                 if (port && !((url.protocol === "https:" && port === "443") || (url.protocol === "http:" && port === "80"))) {
                     headerValue += `:${port}`;
                 }
+            } else if (headerName === "accept-encoding") {
+                // Cloudflare's edge rewrites the incoming Accept-Encoding value before the Worker
+                // sees it, so the literal value can never be recovered here. S3 SDKs that sign this
+                // header (aws-sdk-go, used by rclone/mc) always set it to "identity" beforehand, since
+                // S3 doesn't support transparent content-encoding on object bodies.
+                headerValue = "identity";
             } else {
                 headerValue = request.headers.get(headerName)?.trim() ?? "";
             }
