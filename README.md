@@ -18,9 +18,14 @@ For the sake of your Google account, we strongly recommend using this in an envi
 ## How to Deploy
 
 ### 1. Prepare a Google Drive API Refresh Token
-You will need to use rclone to obtain your Google API credentials and a Google Drive API refresh token.
+You need Google API credentials and a Google Drive API refresh token. Either method below requires you to first create your own OAuth client (Google requires this per-app; a shared client cannot be scripted around it) — see the steps in either option.
+
+**Option A: rclone**
 Follow the rclone documentation to configure the client.  
 https://rclone.org/drive/#making-your-own-client-id
+
+**Option B: local script**
+Run `pnpm get-refresh-token -- --client-id <ID> --client-secret <SECRET>` (see `scripts/get-google-refresh-token.mjs` for the Google Cloud Console setup steps — enabling the Drive API and creating a "Desktop app" OAuth client). It opens the consent screen, catches the redirect locally, and prints the values below directly.
 
 > [!NOTE]
 > When your Google API client is in "Testing" mode, the refresh token will expire after a certain period of time, so if you need to use it for a long period of time, be sure to switch the mode before authenticating with rclone.

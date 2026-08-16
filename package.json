@@ -8,6 +8,7 @@
         "start": "pnpx wrangler dev",
         "test": "vitest --run",
         "cf-typegen": "pnpx wrangler types",
+        "get-refresh-token": "node scripts/get-google-refresh-token.mjs",
         "lint": "biome check",
         "format": "biome format --write"
     },
