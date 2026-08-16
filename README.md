@@ -1,5 +1,4 @@
 # google-drive-s3
-I.R.I.S. (Integrated Reliable Interop Storage)
 
 Use Cloudflare Workers to turn your Google Drive into S3 object storage at no extra cost.
 
@@ -101,7 +100,7 @@ Google Drive's free tier has 15 GB total storage, and Google applies a 750 GB da
 
 
 ### 5. CORS Configuration
-I.R.I.S. provides native, deny-by-default CORS handling. Set `CORS_ALLOWED_ORIGINS` to a comma-separated list of exact origins:
+The Worker provides native, deny-by-default CORS handling. Set `CORS_ALLOWED_ORIGINS` to a comma-separated list of exact origins:
 
 ```ini
 CORS_ALLOWED_ORIGINS=https://app.example.com,http://localhost:5173

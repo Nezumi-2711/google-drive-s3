@@ -21,7 +21,7 @@ function uploadIdFromXml(xml: string): string {
     return value;
 }
 
-/** Uploads parts in order. I.R.I.S. does not allow parallel or out-of-order part uploads. */
+/** Uploads parts in order. The Worker does not allow parallel or out-of-order part uploads. */
 export async function uploadLargeFile(file: File, key: string, partSize = 16 * 1024 * 1024): Promise<void> {
     const contentType = file.type || "application/octet-stream";
     const create = await presign({ key, contentType, operation: "createMultipart" });

@@ -19,7 +19,7 @@ export function docsResponse(): Response {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>I.R.I.S. S3 API reference</title>
+  <title>Google Drive S3 API reference</title>
 </head>
 <body>
   <script id="api-reference" data-url="${OPENAPI_PATH}"></script>

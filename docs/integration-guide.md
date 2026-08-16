@@ -5,7 +5,7 @@
 Use a backend-for-frontend (BFF) as the trust boundary:
 
 ```text
-Browser → BFF (holds ACCESS_KEY + SECRET_KEY, issues presigned URLs) → I.R.I.S. Worker → Google Drive
+Browser → BFF (holds ACCESS_KEY + SECRET_KEY, issues presigned URLs) → S3 Google Drive Worker → Google Drive
 ```
 
 Never put `SECRET_KEY` in browser code, a static site, or a public environment variable. The browser receives only a short-lived presigned URL for one method and object key.
@@ -18,7 +18,7 @@ Configure the Worker with an explicit allow-list of web origins:
 CORS_ALLOWED_ORIGINS=https://app.example.com,http://localhost:5173
 ```
 
-Set it to `*` only for a genuinely public, credential-free integration. Leaving it unset emits no CORS headers. I.R.I.S. exposes `ETag`, `Content-Range`, `Content-Length`, `Last-Modified`, `Accept-Ranges`, and `x-amz-request-id`, so browser code can inspect the headers that form the effective S3 response payload.
+Set it to `*` only for a genuinely public, credential-free integration. Leaving it unset emits no CORS headers. The Worker exposes `ETag`, `Content-Range`, `Content-Length`, `Last-Modified`, `Accept-Ranges`, and `x-amz-request-id`, so browser code can inspect the headers that form the effective S3 response payload.
 
 ### Server-to-server compatibility
 
@@ -28,18 +28,18 @@ An `OPTIONS` request with no `Origin`, or a preflight from a disallowed origin, 
 
 ## Presign in the BFF
 
-Use `@aws-sdk/s3-request-presigner` and send a limited expiry. I.R.I.S. validates `X-Amz-Expires` and rejects URLs after their signing time plus that value.
+Use `@aws-sdk/s3-request-presigner` and send a limited expiry. The Worker validates `X-Amz-Expires` and rejects URLs after their signing time plus that value.
 
 ```ts
 import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const client = new S3Client({
-    endpoint: env.IRIS_ENDPOINT,
-    region: env.IRIS_REGION,
+    endpoint: env.S3_ENDPOINT,
+    region: env.S3_REGION,
     credentials: {
-        accessKeyId: env.IRIS_ACCESS_KEY,
-        secretAccessKey: env.IRIS_SECRET_KEY,
+        accessKeyId: env.S3_ACCESS_KEY,
+        secretAccessKey: env.S3_SECRET_KEY,
     },
     forcePathStyle: true,
 });
@@ -78,7 +78,7 @@ const etag = response.headers.get("ETag");
 
 Cloudflare request limits mean a single PUT is best kept below roughly 100 MB. For larger files, have the BFF initiate the upload, issue a presigned URL for each part, and complete the upload after the browser returns all ETags.
 
-Use 16 MB parts as a practical baseline. Upload parts **strictly sequentially starting at 1**. I.R.I.S. waits up to 20 seconds for an earlier part; out-of-order work then receives `503 SlowDown`. Requests more than 64 part numbers ahead are rejected immediately.
+Use 16 MB parts as a practical baseline. Upload parts **strictly sequentially starting at 1**. The Worker waits up to 20 seconds for an earlier part; out-of-order work then receives `503 SlowDown`. Requests more than 64 part numbers ahead are rejected immediately.
 
 1. BFF signs `POST /bucket/key?uploads` and starts the multipart upload.
 2. BFF issues a signed `PUT` URL for part 1; browser uploads it and records the `ETag`.

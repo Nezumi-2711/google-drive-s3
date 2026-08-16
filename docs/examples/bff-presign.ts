@@ -2,11 +2,11 @@ import { AbortMultipartUploadCommand, CompleteMultipartUploadCommand, CreateMult
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 interface Env {
-    IRIS_ENDPOINT: string;
-    IRIS_ACCESS_KEY: string;
-    IRIS_SECRET_KEY: string;
-    IRIS_REGION: string;
-    IRIS_BUCKET: string;
+    S3_ENDPOINT: string;
+    S3_ACCESS_KEY: string;
+    S3_SECRET_KEY: string;
+    S3_REGION: string;
+    S3_BUCKET: string;
 }
 
 interface PresignRequest {
@@ -33,10 +33,10 @@ function json(data: unknown, status = 200): Response {
 
 function s3(env: Env): S3Client {
     return new S3Client({
-        endpoint: env.IRIS_ENDPOINT,
-        region: env.IRIS_REGION,
+        endpoint: env.S3_ENDPOINT,
+        region: env.S3_REGION,
         forcePathStyle: true,
-        credentials: { accessKeyId: env.IRIS_ACCESS_KEY, secretAccessKey: env.IRIS_SECRET_KEY },
+        credentials: { accessKeyId: env.S3_ACCESS_KEY, secretAccessKey: env.S3_SECRET_KEY },
     });
 }
 
@@ -62,13 +62,13 @@ export default {
 
         if (operation === "put") {
             const contentType = input.contentType || "application/octet-stream";
-            const url = await getSignedUrl(client, new PutObjectCommand({ Bucket: env.IRIS_BUCKET, Key: input.key, ContentType: contentType }), { expiresIn });
+            const url = await getSignedUrl(client, new PutObjectCommand({ Bucket: env.S3_BUCKET, Key: input.key, ContentType: contentType }), { expiresIn });
             return json({ url, method: "PUT", headers: { "Content-Type": contentType }, expiresIn });
         }
 
         if (operation === "createMultipart") {
             const contentType = input.contentType || "application/octet-stream";
-            const url = await getSignedUrl(client, new CreateMultipartUploadCommand({ Bucket: env.IRIS_BUCKET, Key: input.key, ContentType: contentType }), { expiresIn });
+            const url = await getSignedUrl(client, new CreateMultipartUploadCommand({ Bucket: env.S3_BUCKET, Key: input.key, ContentType: contentType }), { expiresIn });
             return json({ url, method: "POST", headers: { "Content-Type": contentType }, expiresIn });
         }
 
@@ -76,17 +76,17 @@ export default {
         if (operation === "uploadPart") {
             const partNumber = input.partNumber;
             if (!Number.isInteger(partNumber) || partNumber === undefined || partNumber < 1 || partNumber > 10_000) return json({ error: "partNumber must be 1 through 10000" }, 400);
-            const url = await getSignedUrl(client, new UploadPartCommand({ Bucket: env.IRIS_BUCKET, Key: input.key, UploadId: input.uploadId, PartNumber: partNumber }), { expiresIn });
+            const url = await getSignedUrl(client, new UploadPartCommand({ Bucket: env.S3_BUCKET, Key: input.key, UploadId: input.uploadId, PartNumber: partNumber }), { expiresIn });
             return json({ url, method: "PUT", expiresIn });
         }
         if (operation === "completeMultipart") {
             const body = completionXml(input.parts);
             if (!body) return json({ error: "parts must have sequential PartNumber values beginning at 1 and non-empty ETag values" }, 400);
-            const url = await getSignedUrl(client, new CompleteMultipartUploadCommand({ Bucket: env.IRIS_BUCKET, Key: input.key, UploadId: input.uploadId, MultipartUpload: { Parts: input.parts } }), { expiresIn });
+            const url = await getSignedUrl(client, new CompleteMultipartUploadCommand({ Bucket: env.S3_BUCKET, Key: input.key, UploadId: input.uploadId, MultipartUpload: { Parts: input.parts } }), { expiresIn });
             return json({ url, method: "POST", headers: { "Content-Type": "application/xml" }, body, expiresIn });
         }
         if (operation === "abortMultipart") {
-            const url = await getSignedUrl(client, new AbortMultipartUploadCommand({ Bucket: env.IRIS_BUCKET, Key: input.key, UploadId: input.uploadId }), { expiresIn });
+            const url = await getSignedUrl(client, new AbortMultipartUploadCommand({ Bucket: env.S3_BUCKET, Key: input.key, UploadId: input.uploadId }), { expiresIn });
             return json({ url, method: "DELETE", expiresIn });
         }
 

@@ -1,10 +1,10 @@
 # Limitations
 
-I.R.I.S. is a narrow S3 compatibility layer. Design frontend features around the behavior below.
+This project is a narrow S3 compatibility layer. Design frontend features around the behavior below.
 
 ## Listing is not pageable
 
-`max-keys`, `continuation-token`, and `marker` are ignored. I.R.I.S. scans at most 5000 Google Drive nodes and then sets `IsTruncated=true`; it does not provide a continuation token, so additional results cannot be requested. The XML value `MaxKeys=1000` is a fixed compatibility value, not the real scan limit.
+`max-keys`, `continuation-token`, and `marker` are ignored. The Worker scans at most 5000 Google Drive nodes and then sets `IsTruncated=true`; it does not provide a continuation token, so additional results cannot be requested. The XML value `MaxKeys=1000` is a fixed compatibility value, not the real scan limit.
 
 Use narrow prefixes and `delimiter=/` for a file browser. Do not build an infinite-scrolling full-drive browser.
 
@@ -24,7 +24,7 @@ Bucket `?acl`, `?versioning`, and `?location` requests are currently treated as 
 
 ## Directories and objects
 
-Directories are physical Google Drive folders created from object-key path segments. I.R.I.S. does not create zero-byte directory marker objects. An empty prefix can therefore exist as a Drive folder without an S3 marker object.
+Directories are physical Google Drive folders created from object-key path segments. The Worker does not create zero-byte directory marker objects. An empty prefix can therefore exist as a Drive folder without an S3 marker object.
 
 ## Multipart behavior
 

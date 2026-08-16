@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: I.R.I.S. Google Drive S3 API
+  title: Google Drive S3 API
   version: 1.0.0
   description: |
     An intentionally small S3-compatible object-storage API backed by Google Drive.

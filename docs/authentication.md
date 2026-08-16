@@ -1,6 +1,6 @@
 # Authentication and Signature V4
 
-I.R.I.S. accepts AWS Signature Version 4 in either form:
+The Worker accepts AWS Signature Version 4 in either form:
 
 - an `Authorization: AWS4-HMAC-SHA256 …` header with `x-amz-date`; or
 - a presigned request with `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-SignedHeaders`, and `X-Amz-Signature` query parameters.
@@ -28,7 +28,7 @@ The canonical request is built from:
 5. the signed-header list; and
 6. `x-amz-content-sha256`, defaulting to `UNSIGNED-PAYLOAD`.
 
-I.R.I.S. deliberately canonicalizes a signed `accept-encoding` header to `identity`. Cloudflare can rewrite the received value at the edge; S3 SDKs that sign this header use `identity` for this reason. Browser code must not sign `accept-encoding` because browser networking controls it.
+The Worker deliberately canonicalizes a signed `accept-encoding` header to `identity`. Cloudflare can rewrite the received value at the edge; S3 SDKs that sign this header use `identity` for this reason. Browser code must not sign `accept-encoding` because browser networking controls it.
 
 Payload hashes are **not** verified. Browser and BFF clients should use `x-amz-content-sha256: UNSIGNED-PAYLOAD`; this is a deliberate streaming limitation, not an integrity guarantee.
 
