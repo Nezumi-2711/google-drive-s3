@@ -1,6 +1,6 @@
 import { decodedContentLength, isAwsChunked, pumpBody } from "./aws-chunked";
 import { createSession, nextDriveOffset } from "./drive-resumable";
-import { deleteFromDrive, findFileInFolder, getFileMetadata, listFiles, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive } from "./google-drive";
+import { deleteFromDrive, findFileInFolder, getFileMetadata, listObjects, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive } from "./google-drive";
 import { S3Exception, s3Error } from "./s3-errors";
 import { completeMultipartUploadResult, generateListBucketResult, initiateMultipartUploadResult, listMultipartUploadsResult, listPartsResult, parseCompleteMultipartUpload } from "./s3-xml";
 import type { DriveUploadResult, Env } from "./types";
@@ -191,7 +191,12 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
     if (method === "PUT" && key) return putObject(request, env, accessToken, bucket, key);
 
     if (method === "GET") {
-        if (!key) return xmlResponse(generateListBucketResult(await listFiles(accessToken, bucket, env), bucket));
+        if (!key) {
+            const prefix = url.searchParams.get("prefix") ?? "";
+            const delimiter = url.searchParams.get("delimiter") ?? undefined;
+            const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, delimiter);
+            return xmlResponse(generateListBucketResult(bucket, prefix, delimiter, contents, commonPrefixes, truncated));
+        }
         try {
             const file = await streamDownloadFromDrive(accessToken, bucket, key, env, request.headers.get("Range") ?? undefined);
             const headers = new Headers({

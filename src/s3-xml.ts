@@ -1,15 +1,15 @@
-import type { GoogleDriveFile } from "./types";
+import type { ListedObject } from "./google-drive";
 
 export function escapeXml(str: string): string {
     return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 }
 
-export function generateListBucketResult(files: GoogleDriveFile[], bucket: string): string {
+export function generateListBucketResult(bucket: string, prefix: string, delimiter: string | undefined, files: ListedObject[], commonPrefixes: string[], isTruncated: boolean): string {
     const contents = files
         .map(
             (f) => `
     <Contents>
-        <Key>${escapeXml(f.name)}</Key>
+        <Key>${escapeXml(f.key)}</Key>
         <LastModified>${f.modifiedTime || new Date().toISOString()}</LastModified>
         <ETag>"${f.md5Checksum || f.id}"</ETag>
         <Size>${f.size || 0}</Size>
@@ -18,13 +18,15 @@ export function generateListBucketResult(files: GoogleDriveFile[], bucket: strin
         )
         .join("");
 
+    const commonPrefixesXml = commonPrefixes.map((p) => `\n    <CommonPrefixes><Prefix>${escapeXml(p)}</Prefix></CommonPrefixes>`).join("");
+
     return `<?xml version="1.0" encoding="UTF-8"?>
 <ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
     <Name>${escapeXml(bucket)}</Name>
-    <Prefix></Prefix>
+    <Prefix>${escapeXml(prefix)}</Prefix>
+    ${delimiter ? `<Delimiter>${escapeXml(delimiter)}</Delimiter>` : ""}
     <MaxKeys>1000</MaxKeys>
-    <IsTruncated>false</IsTruncated>
-    ${contents}
+    <IsTruncated>${isTruncated}</IsTruncated>${contents}${commonPrefixesXml}
 </ListBucketResult>`;
 }
 

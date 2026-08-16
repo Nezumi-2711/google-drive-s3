@@ -12,6 +12,8 @@ interface GoogleDriveCreateResponse {
 }
 
 const DRIVE_FIELDS = "id,name,size,mimeType,md5Checksum";
+const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+const LIST_NODE_CAP = 5000;
 
 function driveLiteral(value: string): string {
     return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -56,6 +58,18 @@ export async function getAccessToken(env: Env): Promise<string> {
     return data.access_token;
 }
 
+/** Finds a folder by name under the given parent without creating it. Returns null if absent. */
+async function findFolderId(accessToken: string, folderName: string, parentId: string | null): Promise<string | null> {
+    const parentQuery = parentId ? ` and '${parentId}' in parents` : "";
+    const searchRes = await fetch(driveFilesUrl(`name='${driveLiteral(folderName)}' and mimeType='${FOLDER_MIME_TYPE}' and trashed=false${parentQuery}`, "files(id,name)"), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!searchRes.ok) throw new Error(`Drive folder search failed: ${await searchRes.text()}`);
+
+    const searchData: GoogleDriveSearchResponse = await searchRes.json();
+    return searchData.files && searchData.files.length > 0 ? searchData.files[0].id : null;
+}
+
 /** Finds a folder by name under the given parent, creating it if it doesn't exist yet. */
 async function getOrCreateFolder(accessToken: string, folderName: string, parentId: string | null, env: Env): Promise<string> {
     // Include parentId in the cache key so folders with the same name in different parents don't collide.
@@ -63,22 +77,15 @@ async function getOrCreateFolder(accessToken: string, folderName: string, parent
     const cached = await env.FOLDER_CACHE.get(cacheKey);
     if (cached) return cached;
 
-    const parentQuery = parentId ? ` and '${parentId}' in parents` : "";
-    const searchRes = await fetch(driveFilesUrl(`name='${driveLiteral(folderName)}' and mimeType='application/vnd.google-apps.folder' and trashed=false${parentQuery}`, "files(id,name)"), {
-        headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    const searchData: GoogleDriveSearchResponse = await searchRes.json();
-
-    if (searchData.files && searchData.files.length > 0) {
-        const folderId = searchData.files[0].id;
-        await env.FOLDER_CACHE.put(cacheKey, folderId, { expirationTtl: 3600 });
-        return folderId;
+    const found = await findFolderId(accessToken, folderName, parentId);
+    if (found) {
+        await env.FOLDER_CACHE.put(cacheKey, found, { expirationTtl: 3600 });
+        return found;
     }
 
     const createBody: { name: string; mimeType: string; parents?: string[] } = {
         name: folderName,
-        mimeType: "application/vnd.google-apps.folder",
+        mimeType: FOLDER_MIME_TYPE,
     };
 
     if (parentId) {
@@ -93,6 +100,7 @@ async function getOrCreateFolder(accessToken: string, folderName: string, parent
         },
         body: JSON.stringify(createBody),
     });
+    if (!createRes.ok) throw new Error(`Drive folder creation failed: ${await createRes.text()}`);
 
     const createData: GoogleDriveCreateResponse = await createRes.json();
     await env.FOLDER_CACHE.put(cacheKey, createData.id, { expirationTtl: 3600 });
@@ -181,6 +189,7 @@ export async function findFileInFolder(accessToken: string, folderId: string, fi
     const searchRes = await fetch(driveFilesUrl(`name='${driveLiteral(fileName)}' and '${driveLiteral(folderId)}' in parents and trashed=false`, `files(${DRIVE_FIELDS})`), {
         headers: { Authorization: `Bearer ${accessToken}` },
     });
+    if (!searchRes.ok) throw new Error(`Drive file search failed: ${await searchRes.text()}`);
 
     const data: GoogleDriveSearchResponse = await searchRes.json();
     return data.files && data.files.length > 0 ? data.files[0] : null;
@@ -258,13 +267,70 @@ export async function getFileMetadata(accessToken: string, bucket: string, objec
     };
 }
 
-export async function listFiles(accessToken: string, bucket: string, env: Env): Promise<GoogleDriveFile[]> {
-    const folderId = await getOrCreateFolder(accessToken, bucket, null, env);
-
+async function listChildren(accessToken: string, folderId: string): Promise<GoogleDriveFile[]> {
     const listRes = await fetch(driveFilesUrl(`'${driveLiteral(folderId)}' in parents and trashed=false`, "files(id,name,mimeType,size,modifiedTime,md5Checksum)"), {
         headers: { Authorization: `Bearer ${accessToken}` },
     });
+    if (!listRes.ok) throw new Error(`Drive list failed: ${await listRes.text()}`);
 
     const data: GoogleDriveSearchResponse = await listRes.json();
     return data.files || [];
+}
+
+/** Splits an S3 prefix into the directory portion (real Drive folder path) and the partial name filter for the final segment. */
+function splitPrefix(prefix: string): { dirPrefix: string; partial: string } {
+    const index = prefix.lastIndexOf("/");
+    return index === -1 ? { dirPrefix: "", partial: prefix } : { dirPrefix: prefix.slice(0, index + 1), partial: prefix.slice(index + 1) };
+}
+
+/** Walks an existing (read-only) folder path under the bucket; returns null if any segment is missing. */
+async function resolvePrefixFolder(accessToken: string, bucket: string, dirParts: string[]): Promise<string | null> {
+    let folderId = await findFolderId(accessToken, bucket, null);
+    for (const part of dirParts) {
+        if (folderId === null) return null;
+        folderId = await findFolderId(accessToken, part, folderId);
+    }
+    return folderId;
+}
+
+export interface ListedObject extends GoogleDriveFile {
+    key: string;
+}
+
+/** Lists objects under a bucket, honoring an S3-style prefix and an optional single-level delimiter. */
+export async function listObjects(accessToken: string, bucket: string, prefix: string, delimiter?: string): Promise<{ contents: ListedObject[]; commonPrefixes: string[]; truncated: boolean }> {
+    const { dirPrefix, partial } = splitPrefix(prefix);
+    const dirParts = dirPrefix.split("/").filter((part) => part !== "");
+    const folderId = await resolvePrefixFolder(accessToken, bucket, dirParts);
+    if (folderId === null) return { contents: [], commonPrefixes: [], truncated: false };
+
+    const contents: ListedObject[] = [];
+    const commonPrefixes = new Set<string>();
+    let truncated = false;
+    let scanned = 0;
+
+    async function walk(currentFolderId: string, keyPrefix: string, applyPartialFilter: boolean): Promise<void> {
+        const children = await listChildren(accessToken, currentFolderId);
+        for (const child of children) {
+            if (applyPartialFilter && !child.name.startsWith(partial)) continue;
+            if (++scanned > LIST_NODE_CAP) {
+                truncated = true;
+                return;
+            }
+            const childKey = `${keyPrefix}${child.name}`;
+            if (child.mimeType === FOLDER_MIME_TYPE) {
+                if (delimiter) {
+                    commonPrefixes.add(`${childKey}${delimiter}`);
+                } else {
+                    await walk(child.id, `${childKey}/`, false);
+                }
+            } else {
+                contents.push({ ...child, key: childKey });
+            }
+            if (truncated) return;
+        }
+    }
+
+    await walk(folderId, dirPrefix, true);
+    return { contents, commonPrefixes: [...commonPrefixes].sort(), truncated };
 }

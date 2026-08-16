@@ -20,6 +20,14 @@ interface StoredFile {
     md5Checksum: string;
 }
 
+interface StoredFolder {
+    id: string;
+    name: string;
+    parent: string;
+}
+
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+
 interface UploadSession {
     id: string;
     fileId?: string;
@@ -31,6 +39,7 @@ interface UploadSession {
 
 class FakeDrive {
     readonly files = new Map<string, StoredFile>();
+    readonly folders = new Map<string, StoredFolder>();
     readonly sessions = new Map<string, UploadSession>();
     private nextId = 1;
 
@@ -54,23 +63,36 @@ class FakeDrive {
 
     private search(url: URL): Response {
         const q = url.searchParams.get("q") ?? "";
+        const hasNameFilter = /name='/.test(q);
         const name = /name='((?:\\.|[^'])*)'/.exec(q)?.[1]?.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
-        const parent = /'([^']+)' in parents/.exec(q)?.[1];
-        if (q.includes("application/vnd.google-apps.folder")) {
-            const id = parent ? `folder:${parent}:${name}` : `folder:${name}`;
-            return Response.json({ files: [{ id, name, mimeType: "application/vnd.google-apps.folder" }] });
+        const parent = /'([^']+)' in parents/.exec(q)?.[1] ?? "root";
+
+        if (q.includes(FOLDER_MIME)) {
+            const match = [...this.folders.values()].find((folder) => folder.name === name && folder.parent === parent);
+            return Response.json({ files: match ? [{ id: match.id, name: match.name, mimeType: FOLDER_MIME }] : [] });
         }
-        const files = [...this.files.values()].filter((file) => file.name === name && file.parent === parent);
-        return Response.json({ files: files.map((file) => ({ ...file, size: String(file.data.byteLength), data: undefined })) });
+
+        const files = [...this.files.values()].filter((file) => (!hasNameFilter || file.name === name) && file.parent === parent);
+        const folders = [...this.folders.values()].filter((folder) => (!hasNameFilter || folder.name === name) && folder.parent === parent);
+        return Response.json({
+            files: [...files.map((file) => ({ ...file, size: String(file.data.byteLength), data: undefined })), ...folders.map((folder) => ({ id: folder.id, name: folder.name, mimeType: FOLDER_MIME }))],
+        });
     }
 
     private createMetadata(metadata: Record<string, unknown>): Response {
+        const mimeType = String(metadata.mimeType ?? "application/octet-stream");
+        const parent = String((metadata.parents as string[] | undefined)?.[0] ?? "root");
+        if (mimeType === FOLDER_MIME) {
+            const id = `folder-${this.nextId++}`;
+            this.folders.set(id, { id, name: String(metadata.name), parent });
+            return Response.json({ id, name: metadata.name, mimeType });
+        }
         const id = `file-${this.nextId++}`;
         const file: StoredFile = {
             id,
             name: String(metadata.name),
-            parent: String((metadata.parents as string[] | undefined)?.[0] ?? ""),
-            mimeType: String(metadata.mimeType ?? "application/octet-stream"),
+            parent,
+            mimeType,
             data: new Uint8Array(),
             md5Checksum: "d41d8cd98f00b204e9800998ecf8427e",
         };
@@ -187,6 +209,7 @@ beforeEach(async () => {
         vi.fn((input, init) => drive.handle(input, init)),
     );
     await ENV.AUTH_KV.delete("google_access_token");
+    for (const { name } of (await ENV.FOLDER_CACHE.list()).keys) await ENV.FOLDER_CACHE.delete(name);
 });
 
 describe("S3 compatibility", () => {
@@ -285,6 +308,31 @@ describe("S3 compatibility", () => {
         const response = await worker.fetch(await signed("/test-bucket/empty", { method: "PUT", body: new Uint8Array() }), ENV, CTX);
         expect(response.status).toBe(200);
         expect([...drive.files.values()].find((file) => file.name === "empty")!.data.byteLength).toBe(0);
+    });
+
+    it("lists nested keys under a prefix, as CommonPrefixes with a delimiter and recursively without one", async () => {
+        await worker.fetch(await signed("/test-bucket/dir1/a.txt", { method: "PUT", body: "a" }), ENV, CTX);
+        await worker.fetch(await signed("/test-bucket/dir1/sub/b.txt", { method: "PUT", body: "b" }), ENV, CTX);
+        await worker.fetch(await signed("/test-bucket/dir2/c.txt", { method: "PUT", body: "c" }), ENV, CTX);
+
+        const root = await worker.fetch(await signed(`/test-bucket?prefix=&delimiter=${encodeURIComponent("/")}`, { method: "GET" }), ENV, CTX);
+        expect(root.status).toBe(200);
+        const rootXml = await root.text();
+        expect(rootXml).toContain("<CommonPrefixes><Prefix>dir1/</Prefix></CommonPrefixes>");
+        expect(rootXml).toContain("<CommonPrefixes><Prefix>dir2/</Prefix></CommonPrefixes>");
+        expect(rootXml).not.toContain("<Contents>");
+
+        const dir1Delimited = await worker.fetch(await signed(`/test-bucket?prefix=${encodeURIComponent("dir1/")}&delimiter=${encodeURIComponent("/")}`, { method: "GET" }), ENV, CTX);
+        const dir1Xml = await dir1Delimited.text();
+        expect(dir1Xml).toContain("<Key>dir1/a.txt</Key>");
+        expect(dir1Xml).toContain("<CommonPrefixes><Prefix>dir1/sub/</Prefix></CommonPrefixes>");
+        expect(dir1Xml).not.toContain("dir1/sub/b.txt");
+
+        const dir1Recursive = await worker.fetch(await signed(`/test-bucket?prefix=${encodeURIComponent("dir1/")}`, { method: "GET" }), ENV, CTX);
+        const dir1RecursiveXml = await dir1Recursive.text();
+        expect(dir1RecursiveXml).toContain("<Key>dir1/a.txt</Key>");
+        expect(dir1RecursiveXml).toContain("<Key>dir1/sub/b.txt</Key>");
+        expect(dir1RecursiveXml).not.toContain("<CommonPrefixes>");
     });
 });
 
