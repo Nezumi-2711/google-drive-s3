@@ -16,7 +16,8 @@
     "rules": [
         {
             "type": "Text",
-            "globs": ["docs/openapi.yaml"]
+            "globs": ["**/*.yaml"],
+            "fallthrough": false
         }
     ],
     "observability": {
