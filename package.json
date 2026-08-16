@@ -19,6 +19,7 @@
         "@cloudflare/vitest-pool-workers": "^0.20.3",
         "aws4fetch": "^1.0.20",
         "typescript": "^7.0.2",
-        "vitest": "~4.1.10"
+        "vitest": "~4.1.10",
+        "wrangler": "^4.123.0"
     }
 }
