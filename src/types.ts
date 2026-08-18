@@ -8,6 +8,7 @@ export interface Env {
     AUTH_KV: KVNamespace;
     FOLDER_CACHE: KVNamespace;
     MPU: DurableObjectNamespace<import("./multipart-do").MultipartUploadDO>;
+    DASHBOARD_PASSWORD?: string;
     ALLOWED_BUCKETS?: string;
     PUBLIC_READ_BUCKETS?: string;
     ALLOW_MULTIPART?: string;

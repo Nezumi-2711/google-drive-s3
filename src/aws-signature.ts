@@ -22,7 +22,7 @@ async function hmacSha256(key: string | ArrayBuffer, data: string): Promise<Arra
     return await crypto.subtle.sign("HMAC", cryptoKey, new TextEncoder().encode(data));
 }
 
-async function sha256(data: string): Promise<string> {
+export async function sha256(data: string): Promise<string> {
     const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(data));
     return bufToHex(hash);
 }
@@ -121,7 +121,7 @@ function parseAmzDate(datetime: string): number | null {
     return timestamp;
 }
 
-function constantTimeEqual(left: string, right: string): boolean {
+export function constantTimeEqual(left: string, right: string): boolean {
     if (left.length !== right.length) return false;
     let mismatch = 0;
     for (let index = 0; index < left.length; index++) {

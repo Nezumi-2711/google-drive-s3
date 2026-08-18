@@ -36,4 +36,12 @@ Payload hashes are **not** verified. Browser and BFF clients should use `x-amz-c
 
 Buckets listed in `PUBLIC_READ_BUCKETS` permit unsigned `GET` and `HEAD` requests. All write operations still require valid Signature V4 authentication. `PUBLIC_READ_BUCKETS` must be a subset of `ALLOWED_BUCKETS`.
 
+## Dashboard login API
+
+The Worker provides management API endpoints under `/auth/*` for the management dashboard (`s3-drive-storage-manage`). These endpoints **do not** use AWS Signature V4:
+
+- `POST /auth/login` — Verifies `{ passwordHash }` against `DASHBOARD_PASSWORD` (SHA-256 compared in constant time). Returns `{ token, expiresIn }` on success (opaque 256-bit base64url token with a 12-hour TTL stored in `AUTH_KV`). Rate-limited to 5 failed attempts per IP within 15 minutes.
+- `GET /auth/session` — Validates the session token supplied in `Authorization: Bearer <token>`. Returns `{ valid: true }` if valid, or `401` if expired/invalid.
+- `POST /auth/logout` — Revokes the session token supplied in `Authorization: Bearer <token>`. Returns `204 No Content`.
+
 For a tested signing reference, see the `signed()` helper in [`test/s3.test.ts`](../test/s3.test.ts).

@@ -1,3 +1,4 @@
+import { AUTH_PATH_PREFIX, handleAuth } from "./auth-api";
 import { verifySignature } from "./aws-signature";
 import { isAllowedBucket, isPublicReadBucket } from "./bucket-access";
 import { preflightResponse, withCors } from "./cors";
@@ -21,6 +22,10 @@ export default {
         }
 
         const pathParts = url.pathname.split("/").filter(Boolean);
+        if (pathParts[0] === AUTH_PATH_PREFIX && !isAllowedBucket(AUTH_PATH_PREFIX, env)) {
+            return withCors(await handleAuth(request, env, pathParts.slice(1).join("/")), request, env);
+        }
+
         const bucket = pathParts[0] || "";
         const objectKey = pathParts.slice(1).join("/");
         const resource = url.pathname || "/";

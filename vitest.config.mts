@@ -13,6 +13,7 @@ export default defineConfig({
                     GOOGLE_CLIENT_ID: "test-client-id",
                     GOOGLE_CLIENT_SECRET: "test-client-secret",
                     GOOGLE_REFRESH_TOKEN: "test-refresh-token",
+                    DASHBOARD_PASSWORD: "test-dashboard-password",
                     ALLOWED_BUCKETS: "test-bucket,empty-bucket,my-bucket",
                     ALLOW_MULTIPART: "true",
                     ETAG_STYLE: "md5",
