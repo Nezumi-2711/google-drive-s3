@@ -57,3 +57,35 @@ export interface DriveFileMetadata {
     md5Checksum?: string;
     modifiedTime?: string;
 }
+
+export interface DriveAboutUser {
+    displayName?: string;
+    emailAddress?: string;
+}
+
+export interface DriveAboutStorageQuota {
+    limit?: string;
+    usage?: string;
+    usageInDrive?: string;
+    usageInDriveTrash?: string;
+}
+
+export interface GoogleDriveAboutResponse {
+    user?: DriveAboutUser;
+    storageQuota?: DriveAboutStorageQuota;
+}
+
+export interface DriveAbout {
+    user: {
+        emailAddress: string | null;
+        displayName: string | null;
+    };
+    storageQuota: {
+        limit: number | null;
+        usage: number;
+        usageInDrive: number;
+        usageInDriveTrash: number;
+        free: number | null;
+        percentUsed: number | null;
+    };
+}

@@ -8,7 +8,7 @@ const SESSION_TTL_SECONDS = 12 * 60 * 60;
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_SECONDS = 900;
 
-function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+export function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
     return new Response(JSON.stringify(body), {
         status,
         headers: {
@@ -16,6 +16,14 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
             ...headers,
         },
     });
+}
+
+export async function verifySessionToken(request: Request, env: Env): Promise<boolean> {
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) return false;
+    const token = authHeader.slice("Bearer ".length).trim();
+    if (!token) return false;
+    return (await env.AUTH_KV.get(`${SESSION_PREFIX}${await sha256(token)}`)) !== null;
 }
 
 function generateToken(): string {
@@ -86,19 +94,8 @@ export async function handleAuth(request: Request, env: Env, subPath: string): P
                 return jsonResponse({ message: "Method Not Allowed" }, 405);
             }
 
-            const authHeader = request.headers.get("Authorization");
-            if (!authHeader?.startsWith("Bearer ")) {
-                return jsonResponse({ message: "Session expired or invalid" }, 401);
-            }
-
-            const token = authHeader.slice("Bearer ".length).trim();
-            if (!token) {
-                return jsonResponse({ message: "Session expired or invalid" }, 401);
-            }
-
-            const tokenHash = await sha256(token);
-            const session = await env.AUTH_KV.get(`${SESSION_PREFIX}${tokenHash}`);
-            if (!session) {
+            const isValid = await verifySessionToken(request, env);
+            if (!isValid) {
                 return jsonResponse({ message: "Session expired or invalid" }, 401);
             }
 

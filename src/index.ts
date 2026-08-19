@@ -7,6 +7,7 @@ import { getAccessToken } from "./google-drive";
 import { MultipartUploadDO } from "./multipart-do";
 import { dispatch } from "./router";
 import { S3Exception, s3Error } from "./s3-errors";
+import { API_PATH_PREFIX, handleApi } from "./status-api";
 import type { Env } from "./types";
 
 export { MultipartUploadDO };
@@ -24,6 +25,9 @@ export default {
         const pathParts = url.pathname.split("/").filter(Boolean);
         if (pathParts[0] === AUTH_PATH_PREFIX && !isAllowedBucket(AUTH_PATH_PREFIX, env)) {
             return withCors(await handleAuth(request, env, pathParts.slice(1).join("/")), request, env);
+        }
+        if (pathParts[0] === API_PATH_PREFIX && !isAllowedBucket(API_PATH_PREFIX, env)) {
+            return withCors(await handleApi(request, env, pathParts.slice(1).join("/")), request, env);
         }
 
         const bucket = pathParts[0] || "";

@@ -98,6 +98,58 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthError' }
+  /api/status:
+    get:
+      tags: [Dashboard Status]
+      operationId: getGatewayStatus
+      summary: Get gateway and storage health status
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Gateway status and Drive account/quota overview.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GatewayStatus' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '503':
+          description: Dashboard authentication not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/buckets:
+    get:
+      tags: [Dashboard Status]
+      operationId: getBucketStats
+      summary: Get bucket list and object metrics
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: refresh
+          in: query
+          description: Set to 1 to bypass KV cache.
+          required: false
+          schema: { type: string, example: "1" }
+      responses:
+        '200':
+          description: Bucket statistics and aggregate totals.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketStats' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '503':
+          description: Dashboard authentication not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
   /{bucket}:
     parameters:
       - $ref: '#/components/parameters/Bucket'
@@ -402,6 +454,81 @@ components:
           type: integer
           description: Token TTL in seconds.
           example: 43200
+    GatewayStatus:
+      type: object
+      required: [gateway, drive, checkedAt]
+      properties:
+        gateway:
+          type: object
+          required: [status, region, multipartEnabled, etagStyle, docsEnabled, buckets, publicReadBuckets, corsOrigins, credentials]
+          properties:
+            status: { type: string, enum: [ok, degraded] }
+            region: { type: string, example: auto }
+            multipartEnabled: { type: boolean }
+            etagStyle: { type: string, enum: [md5, multipart] }
+            docsEnabled: { type: boolean }
+            buckets: { type: array, items: { type: string } }
+            publicReadBuckets: { type: array, items: { type: string } }
+            corsOrigins: { type: array, items: { type: string } }
+            credentials:
+              type: object
+              required: [s3Keys, googleOAuth, dashboardPassword]
+              properties:
+                s3Keys: { type: boolean }
+                googleOAuth: { type: boolean }
+                dashboardPassword: { type: boolean }
+        drive:
+          type: object
+          required: [connected, account, quota, error]
+          properties:
+            connected: { type: boolean }
+            account:
+              type: object
+              nullable: true
+              properties:
+                email: { type: string, nullable: true }
+                displayName: { type: string, nullable: true }
+            quota:
+              type: object
+              nullable: true
+              properties:
+                limit: { type: integer, nullable: true }
+                usage: { type: integer }
+                usageInDrive: { type: integer }
+                usageInDriveTrash: { type: integer }
+                free: { type: integer, nullable: true }
+                percentUsed: { type: number, nullable: true }
+            error: { type: string, nullable: true }
+        checkedAt:
+          type: string
+          format: date-time
+    BucketStats:
+      type: object
+      required: [buckets, totals, cachedAt]
+      properties:
+        buckets:
+          type: array
+          items:
+            type: object
+            required: [name, objectCount, totalSize, lastModified, truncated, publicRead, error]
+            properties:
+              name: { type: string }
+              objectCount: { type: integer }
+              totalSize: { type: integer }
+              lastModified: { type: string, format: date-time, nullable: true }
+              truncated: { type: boolean }
+              publicRead: { type: boolean }
+              error: { type: string, nullable: true }
+        totals:
+          type: object
+          required: [buckets, objectCount, totalSize]
+          properties:
+            buckets: { type: integer }
+            objectCount: { type: integer }
+            totalSize: { type: integer }
+        cachedAt:
+          type: string
+          format: date-time
     AuthError:
       type: object
       required: [message]

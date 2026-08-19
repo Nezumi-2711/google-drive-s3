@@ -1,5 +1,5 @@
 import { decodedContentLength, isAwsChunked, pumpBody } from "./aws-chunked";
-import type { DriveDownloadResult, DriveFileMetadata, DriveUploadResult, Env, GoogleDriveFile, GoogleDriveSearchResponse } from "./types";
+import type { DriveAbout, DriveDownloadResult, DriveFileMetadata, DriveUploadResult, Env, GoogleDriveAboutResponse, GoogleDriveFile, GoogleDriveSearchResponse } from "./types";
 
 interface GoogleTokenResponse {
     access_token: string;
@@ -336,4 +336,43 @@ export async function listObjects(accessToken: string, bucket: string, prefix: s
 
     await walk(folderId, dirPrefix, true);
     return { contents, commonPrefixes: [...commonPrefixes].sort(), truncated };
+}
+
+/** Fetches Google Drive account and storage quota details. */
+export async function getDriveAbout(accessToken: string): Promise<DriveAbout> {
+    const url = new URL("https://www.googleapis.com/drive/v3/about");
+    url.searchParams.set("fields", "user(displayName,emailAddress),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)");
+
+    const response = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+        throw new Error(`Drive about request failed: ${await response.text()}`);
+    }
+
+    const data: GoogleDriveAboutResponse = await response.json();
+    const quota = data.storageQuota;
+    const limit = quota?.limit !== undefined && quota?.limit !== null ? parseInt(quota.limit, 10) : null;
+    const usage = quota?.usage ? parseInt(quota.usage, 10) : 0;
+    const usageInDrive = quota?.usageInDrive ? parseInt(quota.usageInDrive, 10) : 0;
+    const usageInDriveTrash = quota?.usageInDriveTrash ? parseInt(quota.usageInDriveTrash, 10) : 0;
+
+    const free = limit !== null ? Math.max(0, limit - usage) : null;
+    const percentUsed = limit !== null && limit > 0 ? Math.round((usage / limit) * 1000) / 10 : null;
+
+    return {
+        user: {
+            emailAddress: data.user?.emailAddress ?? null,
+            displayName: data.user?.displayName ?? null,
+        },
+        storageQuota: {
+            limit,
+            usage,
+            usageInDrive,
+            usageInDriveTrash,
+            free,
+            percentUsed,
+        },
+    };
 }
