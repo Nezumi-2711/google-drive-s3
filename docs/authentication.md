@@ -34,7 +34,7 @@ Payload hashes are **not** verified. Browser and BFF clients should use `x-amz-c
 
 ## Public-read buckets
 
-Buckets listed in `PUBLIC_READ_BUCKETS` permit unsigned `GET` and `HEAD` requests. All write operations still require valid Signature V4 authentication. `PUBLIC_READ_BUCKETS` must be a subset of `ALLOWED_BUCKETS`.
+Buckets configured with `publicRead: true` (managed via the dashboard or API) permit unsigned `GET` and `HEAD` requests. All write operations still require valid Signature V4 authentication. Bucket metadata is tracked via Drive `appProperties`.
 
 ## Dashboard login API
 

@@ -76,8 +76,7 @@ https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboa
 | `REGION` | The region used by the S3 client. |
 | `GOOGLE_CLIENT_ID`,  `GOOGLE_CLIENT_SECRET`,   `GOOGLE_REFRESH_TOKEN` | Google API credentials obtained from rclone. |
 | `DASHBOARD_PASSWORD` | *(Optional)* Plaintext password for dashboard management API authentication. |
-| `ALLOWED_BUCKETS` | Set the buckets allowed, separated by `,`. A directory with the bucket name will be created directly under Google Drive. |
-| `PUBLIC_READ_BUCKETS` | *(Optional)* Buckets that allow unauthenticated GET/HEAD access without signature, separated by `,`. Write operations (PUT/POST/DELETE) still require authentication. Must be a subset of `ALLOWED_BUCKETS`. |
+| `DRIVE_ROOT_FOLDER` | Root folder name in Google Drive where all buckets reside (e.g. `s3-storage`). Set in `wrangler.jsonc` vars or as a secret. |
 | `CORS_ALLOWED_ORIGINS` | *(Optional)* Comma-separated exact browser origins, or `*`. Unset emits no CORS headers. |
 | `ENABLE_DOCS` | *(Optional)* Set to `false` to disable `/docs` and `/openapi.yaml`; enabled by default. |
 

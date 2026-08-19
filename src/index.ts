@@ -1,6 +1,6 @@
 import { AUTH_PATH_PREFIX, handleAuth } from "./auth-api";
 import { verifySignature } from "./aws-signature";
-import { isAllowedBucket, isPublicReadBucket } from "./bucket-access";
+import { findBucketRecord } from "./bucket-registry";
 import { preflightResponse, withCors } from "./cors";
 import * as docs from "./docs";
 import { getAccessToken } from "./google-drive";
@@ -19,14 +19,14 @@ export default {
         const url = new URL(request.url);
         if (env.ENABLE_DOCS !== "false") {
             if (request.method === "GET" && url.pathname === docs.OPENAPI_PATH) return withCors(docs.openApiResponse(), request, env);
-            if (request.method === "GET" && url.pathname === docs.DOCS_PATH && !isAllowedBucket("docs", env)) return withCors(docs.docsResponse(), request, env);
+            if (request.method === "GET" && url.pathname === docs.DOCS_PATH) return withCors(docs.docsResponse(), request, env);
         }
 
         const pathParts = url.pathname.split("/").filter(Boolean);
-        if (pathParts[0] === AUTH_PATH_PREFIX && !isAllowedBucket(AUTH_PATH_PREFIX, env)) {
+        if (pathParts[0] === AUTH_PATH_PREFIX) {
             return withCors(await handleAuth(request, env, pathParts.slice(1).join("/")), request, env);
         }
-        if (pathParts[0] === API_PATH_PREFIX && !isAllowedBucket(API_PATH_PREFIX, env)) {
+        if (pathParts[0] === API_PATH_PREFIX) {
             return withCors(await handleApi(request, env, pathParts.slice(1).join("/")), request, env);
         }
 
@@ -35,9 +35,10 @@ export default {
         const resource = url.pathname || "/";
 
         try {
-            if (!isAllowedBucket(bucket, env)) return withCors(s3Error("AccessDenied", 403, undefined, resource, request.method === "HEAD"), request, env);
+            const record = await findBucketRecord(env, bucket);
+            if (!record) return withCors(s3Error("AccessDenied", 403, undefined, resource, request.method === "HEAD"), request, env);
 
-            const isPublicRead = isPublicReadBucket(bucket, env) && (request.method === "GET" || request.method === "HEAD");
+            const isPublicRead = record.publicRead && (request.method === "GET" || request.method === "HEAD");
             const signature = isPublicRead ? { ok: true as const } : await verifySignature(request, env);
             if (!signature.ok) {
                 return withCors(s3Error(signature.code, 403, signature.message, resource, request.method === "HEAD"), request, env);
@@ -46,6 +47,9 @@ export default {
             return withCors(await dispatch(request, env, await getAccessToken(env), bucket, objectKey), request, env);
         } catch (error) {
             if (error instanceof S3Exception) return withCors(s3Error(error.code, error.status, error.message, resource, request.method === "HEAD", error.headers), request, env);
+            if (error instanceof Error && error.message === "Storage root folder is not configured") {
+                return withCors(s3Error("AccessDenied", 403, "Access Denied", resource, request.method === "HEAD"), request, env);
+            }
             console.error(JSON.stringify({ message: "request failed", error: error instanceof Error ? error.message : String(error), method: request.method, path: url.pathname }));
             return withCors(s3Error("InternalError", 500, undefined, resource, request.method === "HEAD"), request, env);
         }

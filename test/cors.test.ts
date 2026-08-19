@@ -25,7 +25,19 @@ function fakeGoogleFetch(input: string | URL | Request, init?: RequestInit): Pro
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
     if (url.hostname === "oauth2.googleapis.com") return Promise.resolve(Response.json({ access_token: "token", expires_in: 3600 }));
-    if (url.pathname === "/drive/v3/files" && request.method === "GET") return Promise.resolve(Response.json({ files: [] }));
+    if (url.pathname === "/drive/v3/files" && request.method === "GET") {
+        const q = url.searchParams.get("q") ?? "";
+        if (q.includes("name='s3-storage'") && q.includes("'root' in parents")) {
+            return Promise.resolve(Response.json({ files: [{ id: "root-folder-id", name: "s3-storage" }] }));
+        }
+        if (q.includes("'root-folder-id' in parents")) {
+            return Promise.resolve(Response.json({ files: [{ id: "folder-test-bucket", name: "test-bucket", mimeType: "application/vnd.google-apps.folder" }] }));
+        }
+        if (q.includes("name='test-bucket'")) {
+            return Promise.resolve(Response.json({ files: [{ id: "folder-test-bucket", name: "test-bucket", mimeType: "application/vnd.google-apps.folder" }] }));
+        }
+        return Promise.resolve(Response.json({ files: [] }));
+    }
     if (url.pathname === "/drive/v3/files" && request.method === "POST") return Promise.resolve(Response.json({ id: "folder-1" }));
     if (url.pathname.startsWith("/upload/drive/v3/files")) return Promise.resolve(new Response(null, { headers: { Location: "https://www.googleapis.com/upload/session/test" } }));
     if (url.pathname === "/upload/session/test") return Promise.resolve(Response.json({ id: "file-1", name: "file.txt", md5Checksum: "d41d8cd98f00b204e9800998ecf8427e" }));

@@ -8,9 +8,10 @@
     "main": "src/index.ts",
     "compatibility_date": "2025-09-27",
     "vars": {
+        "DRIVE_ROOT_FOLDER": "s3-storage",
         "ALLOW_MULTIPART": "true",
         "ETAG_STYLE": "md5",
-        "CORS_ALLOWED_ORIGINS": "https://s3-drive-storage-manage.nezumi.workers.dev",
+        "CORS_ALLOWED_ORIGINS": "https://s3-drive-storage-manage.nezumi.workers.dev,http://localhost:5173",
         "ENABLE_DOCS": "true"
     },
     "rules": [

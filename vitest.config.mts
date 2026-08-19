@@ -14,7 +14,7 @@ export default defineConfig({
                     GOOGLE_CLIENT_SECRET: "test-client-secret",
                     GOOGLE_REFRESH_TOKEN: "test-refresh-token",
                     DASHBOARD_PASSWORD: "test-dashboard-password",
-                    ALLOWED_BUCKETS: "test-bucket,empty-bucket,my-bucket",
+                    DRIVE_ROOT_FOLDER: "s3-storage",
                     ALLOW_MULTIPART: "true",
                     ETAG_STYLE: "md5",
                     CORS_ALLOWED_ORIGINS: "http://localhost:5173",

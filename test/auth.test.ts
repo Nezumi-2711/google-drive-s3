@@ -194,13 +194,6 @@ describe("Dashboard authentication API routes", () => {
         expect(blockedRes.headers.get("Retry-After")).toBe("900");
     });
 
-    it("does not claim /auth when auth is a configured bucket", async () => {
-        const withAuthBucket = { ...ENV, ALLOWED_BUCKETS: "test-bucket,auth" };
-        const response = await worker.fetch(new Request(`${ENDPOINT}/auth/login`), withAuthBucket, CTX);
-        expect(response.status).toBe(403);
-        expect(await response.text()).toContain("<Code>SignatureDoesNotMatch</Code>");
-    });
-
     it("emits CORS headers for allowed origin", async () => {
         const res = await worker.fetch(
             new Request(`${ENDPOINT}/auth/session`, {

@@ -14,6 +14,7 @@ interface GoogleDriveCreateResponse {
 const DRIVE_FIELDS = "id,name,size,mimeType,md5Checksum,modifiedTime";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const LIST_NODE_CAP = 5000;
+const ROOT_PARENT = "root";
 
 function driveLiteral(value: string): string {
     return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -58,8 +59,35 @@ export async function getAccessToken(env: Env): Promise<string> {
     return data.access_token;
 }
 
+/** Resolve (tạo nếu chưa có) folder gốc chứa toàn bộ bucket. Throw nếu chưa cấu hình. */
+export async function getRootFolderId(accessToken: string, env: Env): Promise<string> {
+    if (!env.DRIVE_ROOT_FOLDER || env.DRIVE_ROOT_FOLDER.trim() === "") {
+        throw new Error("Storage root folder is not configured");
+    }
+    const rootName = env.DRIVE_ROOT_FOLDER.trim();
+    const cacheKey = `root:${rootName}`;
+    const cached = await env.FOLDER_CACHE.get(cacheKey);
+    if (cached) return cached;
+
+    const id = await getOrCreateFolder(accessToken, rootName, ROOT_PARENT, env);
+    await env.FOLDER_CACHE.put(cacheKey, id, { expirationTtl: 3600 });
+    return id;
+}
+
+/** Folder của bucket, tạo nếu chưa có — dùng cho write path. */
+export async function getBucketFolderId(accessToken: string, bucket: string, env: Env): Promise<string> {
+    const rootFolderId = await getRootFolderId(accessToken, env);
+    return await getOrCreateFolder(accessToken, bucket, rootFolderId, env);
+}
+
+/** Folder của bucket, null nếu chưa tồn tại — dùng cho list/stat path. */
+export async function findBucketFolderId(accessToken: string, bucket: string, env: Env): Promise<string | null> {
+    const rootFolderId = await getRootFolderId(accessToken, env);
+    return await findFolderId(accessToken, bucket, rootFolderId);
+}
+
 /** Finds a folder by name under the given parent without creating it. Returns null if absent. */
-async function findFolderId(accessToken: string, folderName: string, parentId: string | null): Promise<string | null> {
+export async function findFolderId(accessToken: string, folderName: string, parentId: string | null): Promise<string | null> {
     const parentQuery = parentId ? ` and '${parentId}' in parents` : "";
     const searchRes = await fetch(driveFilesUrl(`name='${driveLiteral(folderName)}' and mimeType='${FOLDER_MIME_TYPE}' and trashed=false${parentQuery}`, "files(id,name)"), {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -71,7 +99,7 @@ async function findFolderId(accessToken: string, folderName: string, parentId: s
 }
 
 /** Finds a folder by name under the given parent, creating it if it doesn't exist yet. */
-async function getOrCreateFolder(accessToken: string, folderName: string, parentId: string | null, env: Env): Promise<string> {
+export async function getOrCreateFolder(accessToken: string, folderName: string, parentId: string | null, env: Env): Promise<string> {
     // Include parentId in the cache key so folders with the same name in different parents don't collide.
     const cacheKey = parentId ? `${parentId}/${folderName}` : folderName;
     const cached = await env.FOLDER_CACHE.get(cacheKey);
@@ -107,9 +135,50 @@ async function getOrCreateFolder(accessToken: string, folderName: string, parent
     return createData.id;
 }
 
+export async function listFolderChildren(accessToken: string, folderId: string, fields = "files(id,name,mimeType,size,modifiedTime,createdTime,appProperties)"): Promise<GoogleDriveFile[]> {
+    const listRes = await fetch(driveFilesUrl(`'${driveLiteral(folderId)}' in parents and trashed=false`, fields), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!listRes.ok) throw new Error(`Drive list failed: ${await listRes.text()}`);
+
+    const data: GoogleDriveSearchResponse = await listRes.json();
+    return data.files || [];
+}
+
+export async function folderHasChildren(accessToken: string, folderId: string): Promise<boolean> {
+    const url = new URL("https://www.googleapis.com/drive/v3/files");
+    url.searchParams.set("q", `'${driveLiteral(folderId)}' in parents and trashed=false`);
+    url.searchParams.set("pageSize", "1");
+    url.searchParams.set("fields", "files(id)");
+    const res = await fetch(url.toString(), {
+        headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) throw new Error(`Drive folder child check failed: ${await res.text()}`);
+    const data: GoogleDriveSearchResponse = await res.json();
+    return Boolean(data.files && data.files.length > 0);
+}
+
+export async function updateDriveFile(accessToken: string, fileId: string, body: Record<string, unknown>, params?: { addParents?: string; removeParents?: string }): Promise<GoogleDriveFile> {
+    const url = new URL(`https://www.googleapis.com/drive/v3/files/${fileId}`);
+    url.searchParams.set("fields", "id,name,mimeType,size,modifiedTime,createdTime,appProperties,trashed");
+    if (params?.addParents) url.searchParams.set("addParents", params.addParents);
+    if (params?.removeParents) url.searchParams.set("removeParents", params.removeParents);
+
+    const res = await fetch(url.toString(), {
+        method: "PATCH",
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Drive file update failed: ${await res.text()}`);
+    return (await res.json()) as GoogleDriveFile;
+}
+
 /** Resolves an S3 object key to its parent folder ID, creating the directory hierarchy as needed. */
 export async function resolvePathToFolderAndFile(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<{ parentFolderId: string; fileName: string }> {
-    let currentFolderId = await getOrCreateFolder(accessToken, bucket, null, env);
+    let currentFolderId = await getBucketFolderId(accessToken, bucket, env);
 
     const parts = objectKey.split("/").filter((p) => p);
 
@@ -287,8 +356,8 @@ function splitPrefix(prefix: string): { dirPrefix: string; partial: string } {
 }
 
 /** Walks an existing (read-only) folder path under the bucket; returns null if any segment is missing. */
-async function resolvePrefixFolder(accessToken: string, bucket: string, dirParts: string[]): Promise<string | null> {
-    let folderId = await findFolderId(accessToken, bucket, null);
+async function resolvePrefixFolder(accessToken: string, bucket: string, dirParts: string[], env: Env): Promise<string | null> {
+    let folderId = await findBucketFolderId(accessToken, bucket, env);
     for (const part of dirParts) {
         if (folderId === null) return null;
         folderId = await findFolderId(accessToken, part, folderId);
@@ -301,10 +370,10 @@ export interface ListedObject extends GoogleDriveFile {
 }
 
 /** Lists objects under a bucket, honoring an S3-style prefix and an optional single-level delimiter. */
-export async function listObjects(accessToken: string, bucket: string, prefix: string, delimiter?: string): Promise<{ contents: ListedObject[]; commonPrefixes: string[]; truncated: boolean }> {
+export async function listObjects(accessToken: string, bucket: string, prefix: string, env: Env, delimiter?: string): Promise<{ contents: ListedObject[]; commonPrefixes: string[]; truncated: boolean }> {
     const { dirPrefix, partial } = splitPrefix(prefix);
     const dirParts = dirPrefix.split("/").filter((part) => part !== "");
-    const folderId = await resolvePrefixFolder(accessToken, bucket, dirParts);
+    const folderId = await resolvePrefixFolder(accessToken, bucket, dirParts, env);
     if (folderId === null) return { contents: [], commonPrefixes: [], truncated: false };
 
     const contents: ListedObject[] = [];

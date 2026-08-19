@@ -14,7 +14,7 @@ Use narrow prefixes and `delimiter=/` for a file browser. Do not build an infini
 
 ## Unsupported S3 features
 
-- `ListBuckets`, `CreateBucket`, and `DeleteBucket`
+- `ListBuckets`, `CreateBucket`, and `DeleteBucket` via S3 API (Bucket management and creation/deletion are handled via the dashboard or `/api/buckets` REST API).
 - batch `DeleteObjects`
 - object versioning, ACLs, object tags, lifecycle rules, and `x-amz-meta-*` user metadata
 - CopyObject and UploadPartCopy

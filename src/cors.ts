@@ -1,6 +1,6 @@
 import type { Env } from "./types";
 
-const ALLOWED_METHODS = "GET, HEAD, PUT, POST, DELETE, OPTIONS";
+const ALLOWED_METHODS = "GET, HEAD, PUT, POST, PATCH, DELETE, OPTIONS";
 const DEFAULT_ALLOWED_HEADERS = "Authorization, Content-Type, Content-Length, Content-MD5, Content-Encoding, Range, x-amz-content-sha256, x-amz-copy-source, x-amz-date, x-amz-decoded-content-length, x-amz-mp-object-size, x-amz-security-token";
 const EXPOSED_HEADERS = "ETag, Content-Range, Content-Length, Last-Modified, Accept-Ranges, x-amz-request-id";
 

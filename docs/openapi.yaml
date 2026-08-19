@@ -18,6 +18,7 @@ tags:
   - name: Buckets
   - name: Multipart uploads
   - name: Dashboard Auth
+  - name: Dashboard Status
 paths:
   /auth/login:
     post:
@@ -146,7 +147,157 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/AuthError' }
         '503':
-          description: Dashboard authentication not configured.
+          description: Storage root folder or authentication not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+    post:
+      tags: [Dashboard Status]
+      operationId: createBucket
+      summary: Create a new bucket
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBucketRequest' }
+      responses:
+        '201':
+          description: Bucket created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketRecord' }
+        '400':
+          description: Invalid bucket name.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '409':
+          description: Bucket already exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '503':
+          description: Storage root folder or authentication not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/buckets/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Dashboard Status]
+      operationId: updateBucket
+      summary: Update bucket settings (toggle public read or rename)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateBucketRequest' }
+      responses:
+        '200':
+          description: Bucket updated.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BucketRecord' }
+        '400':
+          description: Invalid request.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '404':
+          description: Bucket not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '409':
+          description: Target bucket name conflict.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+    delete:
+      tags: [Dashboard Status]
+      operationId: deleteBucket
+      summary: Delete an empty bucket
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Bucket deleted.
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '404':
+          description: Bucket not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '409':
+          description: Bucket is not empty.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/import-candidates:
+    get:
+      tags: [Dashboard Status]
+      operationId: listImportCandidates
+      summary: List Drive folders available for import
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of folders under Drive root.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportCandidatesResponse' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/import:
+    post:
+      tags: [Dashboard Status]
+      operationId: importBuckets
+      summary: Import folders from Drive root into storage root folder
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportBucketsRequest' }
+      responses:
+        '200':
+          description: Import results.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+        '400':
+          description: Invalid body.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '401':
+          description: Invalid or expired session.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthError' }
@@ -460,7 +611,7 @@ components:
       properties:
         gateway:
           type: object
-          required: [status, region, multipartEnabled, etagStyle, docsEnabled, buckets, publicReadBuckets, corsOrigins, credentials]
+          required: [status, region, multipartEnabled, etagStyle, docsEnabled, buckets, publicReadBuckets, rootFolder, corsOrigins, credentials]
           properties:
             status: { type: string, enum: [ok, degraded] }
             region: { type: string, example: auto }
@@ -469,6 +620,13 @@ components:
             docsEnabled: { type: boolean }
             buckets: { type: array, items: { type: string } }
             publicReadBuckets: { type: array, items: { type: string } }
+            rootFolder:
+              type: object
+              required: [name, id, configured]
+              properties:
+                name: { type: string, nullable: true }
+                id: { type: string, nullable: true }
+                configured: { type: boolean }
             corsOrigins: { type: array, items: { type: string } }
             credentials:
               type: object
@@ -529,6 +687,61 @@ components:
         cachedAt:
           type: string
           format: date-time
+    BucketRecord:
+      type: object
+      required: [name, folderId, publicRead, createdTime]
+      properties:
+        name: { type: string, example: assets }
+        folderId: { type: string, example: 1A2b3C4d5E6f }
+        publicRead: { type: boolean, example: false }
+        createdTime: { type: string, format: date-time, nullable: true }
+    CreateBucketRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, example: assets }
+        publicRead: { type: boolean, default: false }
+    UpdateBucketRequest:
+      type: object
+      properties:
+        publicRead: { type: boolean }
+        name: { type: string }
+    ImportCandidate:
+      type: object
+      required: [name, folderId, objectCount]
+      properties:
+        name: { type: string, example: legacy-photos }
+        folderId: { type: string, example: 1A2b3C4d5E6f }
+        objectCount: { type: integer, example: 42 }
+    ImportCandidatesResponse:
+      type: object
+      required: [candidates]
+      properties:
+        candidates:
+          type: array
+          items: { $ref: '#/components/schemas/ImportCandidate' }
+    ImportBucketsRequest:
+      type: object
+      required: [names]
+      properties:
+        names:
+          type: array
+          items: { type: string }
+    ImportResult:
+      type: object
+      required: [imported, failed]
+      properties:
+        imported:
+          type: array
+          items: { type: string }
+        failed:
+          type: array
+          items:
+            type: object
+            required: [name, error]
+            properties:
+              name: { type: string }
+              error: { type: string }
     AuthError:
       type: object
       required: [message]

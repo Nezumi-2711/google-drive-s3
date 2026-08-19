@@ -24,16 +24,23 @@ describe("API documentation routes", () => {
 
     it("bypasses documentation routes when disabled", async () => {
         const disabled = { ...ENV, ENABLE_DOCS: "false" };
-        for (const path of ["/docs", "/openapi.yaml"]) {
-            const response = await worker.fetch(new Request(`${ENDPOINT}${path}`), disabled, CTX);
-            expect(response.status).toBe(403);
+        const fakeFetch = vi.fn(async (input: RequestInfo | URL) => {
+            const url = new URL(typeof input === "string" ? input : input instanceof Request ? input.url : input.toString());
+            if (url.origin === "https://oauth2.googleapis.com") return Response.json({ access_token: "token", expires_in: 3600 });
+            const q = url.searchParams.get("q") ?? "";
+            if (q.includes("name='s3-storage'") && q.includes("'root' in parents")) {
+                return Response.json({ files: [{ id: "root-folder-id", name: "s3-storage" }] });
+            }
+            return Response.json({ files: [] });
+        });
+        vi.stubGlobal("fetch", fakeFetch);
+        try {
+            for (const path of ["/docs", "/openapi.yaml"]) {
+                const response = await worker.fetch(new Request(`${ENDPOINT}${path}`), disabled, CTX);
+                expect(response.status).toBe(403);
+            }
+        } finally {
+            vi.unstubAllGlobals();
         }
-    });
-
-    it("does not claim /docs when docs is a configured bucket", async () => {
-        const withDocsBucket = { ...ENV, ALLOWED_BUCKETS: "test-bucket,docs" };
-        const response = await worker.fetch(new Request(`${ENDPOINT}/docs`), withDocsBucket, CTX);
-        expect(response.status).toBe(403);
-        expect(await response.text()).toContain("<Code>SignatureDoesNotMatch</Code>");
     });
 });

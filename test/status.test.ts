@@ -92,6 +92,23 @@ describe("Dashboard status API routes (/api/*)", () => {
                 });
             }
 
+            if (url.pathname === "/drive/v3/files") {
+                const q = url.searchParams.get("q") ?? "";
+                if (q.includes("name='s3-storage'") && q.includes("'root' in parents")) {
+                    return Response.json({ files: [{ id: "root-folder-id", name: "s3-storage" }] });
+                }
+                if (q.includes("'root-folder-id' in parents")) {
+                    return Response.json({
+                        files: [
+                            { id: "folder-test-bucket", name: "test-bucket", mimeType: "application/vnd.google-apps.folder" },
+                            { id: "folder-empty-bucket", name: "empty-bucket", mimeType: "application/vnd.google-apps.folder" },
+                            { id: "folder-my-bucket", name: "my-bucket", mimeType: "application/vnd.google-apps.folder" },
+                        ],
+                    });
+                }
+                return Response.json({ files: [] });
+            }
+
             return new Response("Not found", { status: 404 });
         });
 
@@ -113,6 +130,11 @@ describe("Dashboard status API routes (/api/*)", () => {
             expect(data.gateway.region).toBe("auto");
             expect(data.gateway.multipartEnabled).toBe(true);
             expect(data.gateway.buckets).toEqual(["test-bucket", "empty-bucket", "my-bucket"]);
+            expect(data.gateway.rootFolder).toEqual({
+                name: "s3-storage",
+                id: "root-folder-id",
+                configured: true,
+            });
             expect(data.gateway.credentials).toEqual({
                 s3Keys: true,
                 googleOAuth: true,
@@ -210,6 +232,7 @@ describe("Dashboard status API routes (/api/*)", () => {
 
     it("returns bucket statistics on /api/buckets", async () => {
         await (ENV.AUTH_KV as KVNamespace).delete("drive-about");
+        await (ENV.FOLDER_CACHE as KVNamespace).delete("bucket-registry");
         const token = await getValidToken();
 
         const fakeFetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -219,8 +242,26 @@ describe("Dashboard status API routes (/api/*)", () => {
             }
             if (url.pathname === "/drive/v3/files") {
                 const q = url.searchParams.get("q") ?? "";
-                if (q.includes("name='test-bucket'")) {
+                if (q.includes("name='s3-storage'") && q.includes("'root' in parents")) {
+                    return Response.json({ files: [{ id: "root-folder-id", name: "s3-storage" }] });
+                }
+                if (q.includes("name='test-bucket'") && q.includes("'root-folder-id' in parents")) {
                     return Response.json({ files: [{ id: "folder-test-bucket", name: "test-bucket" }] });
+                }
+                if (q.includes("name='empty-bucket'") && q.includes("'root-folder-id' in parents")) {
+                    return Response.json({ files: [{ id: "folder-empty-bucket", name: "empty-bucket" }] });
+                }
+                if (q.includes("name='my-bucket'") && q.includes("'root-folder-id' in parents")) {
+                    return Response.json({ files: [{ id: "folder-my-bucket", name: "my-bucket" }] });
+                }
+                if (q.includes("'root-folder-id' in parents")) {
+                    return Response.json({
+                        files: [
+                            { id: "folder-test-bucket", name: "test-bucket", mimeType: "application/vnd.google-apps.folder" },
+                            { id: "folder-empty-bucket", name: "empty-bucket", mimeType: "application/vnd.google-apps.folder" },
+                            { id: "folder-my-bucket", name: "my-bucket", mimeType: "application/vnd.google-apps.folder" },
+                        ],
+                    });
                 }
                 if (q.includes("'folder-test-bucket' in parents")) {
                     return Response.json({
@@ -234,6 +275,9 @@ describe("Dashboard status API routes (/api/*)", () => {
                             },
                         ],
                     });
+                }
+                if (q.includes("'folder-empty-bucket' in parents") || q.includes("'folder-my-bucket' in parents")) {
+                    return Response.json({ files: [] });
                 }
                 return Response.json({ files: [] });
             }
@@ -264,14 +308,5 @@ describe("Dashboard status API routes (/api/*)", () => {
         } finally {
             vi.unstubAllGlobals();
         }
-    });
-
-    it("routes /api to S3 handler when 'api' is configured as an allowed bucket", async () => {
-        const customEnv = { ...ENV, ALLOWED_BUCKETS: "api,test-bucket" };
-        const res = await worker.fetch(new Request(`${ENDPOINT}/api/status`), customEnv, CTX);
-        // S3 router checks signature or returns SignatureDoesNotMatch / AccessDenied etc.
-        expect(res.status).toBe(403);
-        const text = await res.text();
-        expect(text).toContain("<Error><Code>");
     });
 });

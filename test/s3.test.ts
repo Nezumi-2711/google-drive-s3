@@ -225,6 +225,14 @@ let drive: FakeDrive;
 
 beforeEach(async () => {
     drive = new FakeDrive();
+    // Pre-create root folder "s3-storage" under "root" and bucket folders under root folder
+    const rootFolderId = "folder-root";
+    drive.folders.set(rootFolderId, { id: rootFolderId, name: "s3-storage", parent: "root" });
+    const testBucketId = "folder-test-bucket";
+    drive.folders.set(testBucketId, { id: testBucketId, name: "test-bucket", parent: rootFolderId });
+    const emptyBucketId = "folder-empty-bucket";
+    drive.folders.set(emptyBucketId, { id: emptyBucketId, name: "empty-bucket", parent: rootFolderId });
+
     vi.stubGlobal(
         "fetch",
         vi.fn((input, init) => drive.handle(input, init)),

@@ -194,7 +194,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
         if (!key) {
             const prefix = url.searchParams.get("prefix") ?? "";
             const delimiter = url.searchParams.get("delimiter") ?? undefined;
-            const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, delimiter);
+            const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, env, delimiter);
             return xmlResponse(generateListBucketResult(bucket, prefix, delimiter, contents, commonPrefixes, truncated));
         }
         try {

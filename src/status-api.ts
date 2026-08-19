@@ -1,6 +1,7 @@
 import { jsonResponse, verifySessionToken } from "./auth-api";
-import { allowedBuckets, publicReadBuckets } from "./bucket-access";
-import { getAccessToken, getDriveAbout, listObjects } from "./google-drive";
+import { handleBucketRoutes, handleImportCandidatesRoute, handleImportRoute } from "./bucket-api";
+import { getBucketRegistry } from "./bucket-registry";
+import { getAccessToken, getDriveAbout, getRootFolderId, listObjects } from "./google-drive";
 import type { DriveAbout, Env } from "./types";
 
 export const API_PATH_PREFIX = "api";
@@ -17,6 +18,11 @@ export interface GatewayStatusResponse {
         docsEnabled: boolean;
         buckets: string[];
         publicReadBuckets: string[];
+        rootFolder: {
+            name: string | null;
+            id: string | null;
+            configured: boolean;
+        };
         corsOrigins: string[];
         credentials: {
             s3Keys: boolean;
@@ -74,19 +80,35 @@ export async function handleApi(request: Request, env: Env, subPath: string): Pr
             return jsonResponse({ message: "Session expired or invalid" }, 401);
         }
 
-        if (request.method !== "GET") {
-            return jsonResponse({ message: "Method Not Allowed" }, 405);
+        if (!env.DRIVE_ROOT_FOLDER || env.DRIVE_ROOT_FOLDER.trim() === "") {
+            return jsonResponse({ message: "Storage root folder is not configured" }, 503);
         }
+
+        const segments = subPath.split("/").filter(Boolean);
+        const firstSegment = segments[0] || "";
+        const remainingSegments = segments.slice(1);
 
         const url = new URL(request.url);
 
-        if (subPath === "status") {
+        if (firstSegment === "status") {
+            if (request.method !== "GET") return jsonResponse({ message: "Method Not Allowed" }, 405);
             return await handleStatus(env);
         }
 
-        if (subPath === "buckets") {
-            const forceRefresh = url.searchParams.get("refresh") === "1";
-            return await handleBuckets(env, forceRefresh);
+        if (firstSegment === "buckets") {
+            if (request.method === "GET" && remainingSegments.length === 0) {
+                const forceRefresh = url.searchParams.get("refresh") === "1";
+                return await handleBuckets(env, forceRefresh);
+            }
+            return await handleBucketRoutes(request, env, remainingSegments);
+        }
+
+        if (firstSegment === "import-candidates") {
+            return await handleImportCandidatesRoute(request, env);
+        }
+
+        if (firstSegment === "import") {
+            return await handleImportRoute(request, env);
         }
 
         return jsonResponse({ message: "Not Found" }, 404);
@@ -104,8 +126,18 @@ export async function handleApi(request: Request, env: Env, subPath: string): Pr
 }
 
 async function handleStatus(env: Env): Promise<Response> {
-    const buckets = allowedBuckets(env);
-    const pubBuckets = publicReadBuckets(env);
+    let buckets: string[] = [];
+    let pubBuckets: string[] = [];
+    let rootFolderId: string | null = null;
+
+    try {
+        const registry = await getBucketRegistry(env);
+        buckets = registry.map((b) => b.name);
+        pubBuckets = registry.filter((b) => b.publicRead).map((b) => b.name);
+    } catch (err) {
+        console.error("Failed to load bucket registry for status", err);
+    }
+
     const corsOrigins = env.CORS_ALLOWED_ORIGINS
         ? env.CORS_ALLOWED_ORIGINS.split(",")
               .map((o) => o.trim())
@@ -116,11 +148,19 @@ async function handleStatus(env: Env): Promise<Response> {
     let driveError: string | null = null;
 
     try {
+        const accessToken = await getAccessToken(env);
+        if (env.DRIVE_ROOT_FOLDER) {
+            try {
+                rootFolderId = await getRootFolderId(accessToken, env);
+            } catch (err) {
+                console.error("Failed to get root folder id", err);
+            }
+        }
+
         const cached = await env.AUTH_KV.get(DRIVE_ABOUT_CACHE_KEY);
         if (cached) {
             driveAbout = JSON.parse(cached) as DriveAbout;
         } else {
-            const accessToken = await getAccessToken(env);
             driveAbout = await getDriveAbout(accessToken);
             await env.AUTH_KV.put(DRIVE_ABOUT_CACHE_KEY, JSON.stringify(driveAbout), {
                 expirationTtl: DRIVE_ABOUT_CACHE_TTL,
@@ -141,6 +181,11 @@ async function handleStatus(env: Env): Promise<Response> {
             docsEnabled: env.ENABLE_DOCS !== "false",
             buckets,
             publicReadBuckets: pubBuckets,
+            rootFolder: {
+                name: env.DRIVE_ROOT_FOLDER || null,
+                id: rootFolderId,
+                configured: Boolean(env.DRIVE_ROOT_FOLDER && env.DRIVE_ROOT_FOLDER.trim() !== ""),
+            },
             corsOrigins,
             credentials: {
                 s3Keys: Boolean(env.ACCESS_KEY && env.SECRET_KEY),
@@ -166,8 +211,12 @@ async function handleStatus(env: Env): Promise<Response> {
 }
 
 async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response> {
-    const buckets = allowedBuckets(env);
-    const pubBuckets = new Set(publicReadBuckets(env));
+    let records: { name: string; publicRead: boolean }[] = [];
+    try {
+        records = await getBucketRegistry(env);
+    } catch (err) {
+        console.error("Failed to acquire bucket registry", err);
+    }
 
     let accessToken: string | null = null;
     try {
@@ -178,7 +227,8 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
 
     const bucketStats: BucketStatItem[] = [];
 
-    for (const bucket of buckets) {
+    for (const record of records) {
+        const bucket = record.name;
         const cacheKey = `bucket-stats:${bucket}`;
         if (!forceRefresh) {
             const cached = await env.FOLDER_CACHE.get(cacheKey);
@@ -199,14 +249,14 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
                 totalSize: 0,
                 lastModified: null,
                 truncated: false,
-                publicRead: pubBuckets.has(bucket),
+                publicRead: record.publicRead,
                 error: "Google Drive access unavailable",
             });
             continue;
         }
 
         try {
-            const { contents, truncated } = await listObjects(accessToken, bucket, "");
+            const { contents, truncated } = await listObjects(accessToken, bucket, "", env);
             let totalSize = 0;
             let latestModified: number | null = null;
 
@@ -227,7 +277,7 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
                 totalSize,
                 lastModified: latestModified ? new Date(latestModified).toISOString() : null,
                 truncated,
-                publicRead: pubBuckets.has(bucket),
+                publicRead: record.publicRead,
                 error: null,
             };
 
@@ -243,7 +293,7 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
                 totalSize: 0,
                 lastModified: null,
                 truncated: false,
-                publicRead: pubBuckets.has(bucket),
+                publicRead: record.publicRead,
                 error: err instanceof Error ? err.message : String(err),
             });
         }

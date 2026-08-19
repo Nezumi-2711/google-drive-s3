@@ -9,8 +9,7 @@ export interface Env {
     FOLDER_CACHE: KVNamespace;
     MPU: DurableObjectNamespace<import("./multipart-do").MultipartUploadDO>;
     DASHBOARD_PASSWORD?: string;
-    ALLOWED_BUCKETS?: string;
-    PUBLIC_READ_BUCKETS?: string;
+    DRIVE_ROOT_FOLDER?: string;
     ALLOW_MULTIPART?: string;
     ETAG_STYLE?: "md5" | "multipart";
     CORS_ALLOWED_ORIGINS?: string;
@@ -23,7 +22,9 @@ export interface GoogleDriveFile {
     mimeType: string;
     size: string;
     modifiedTime?: string;
+    createdTime?: string;
     md5Checksum?: string;
+    appProperties?: Record<string, string>;
 }
 
 export interface GoogleDriveSearchResponse {
