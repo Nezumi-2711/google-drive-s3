@@ -24,11 +24,11 @@ Bucket `?acl`, `?versioning`, and `?location` requests are currently treated as 
 
 ## Directories and objects
 
-Directories are physical Google Drive folders created from object-key path segments. The Worker does not create zero-byte directory marker objects. An empty prefix can therefore exist as a Drive folder without an S3 marker object.
+Directories are physical Google Drive folders created from object-key path segments. The Worker does not create zero-byte directory marker objects. An empty prefix can therefore exist as a Drive folder without an S3 marker object. Folder deletion via `/api/objects/folder` refuses non-empty folders by default, and supports atomic recursive deletion into Google Drive trash when `recursive=1` is provided (avoiding partial deletion via enumeration).
 
 ## Multipart behavior
 
-Parts must be uploaded strictly in consecutive order beginning at part 1. Parts are immutable after they have committed. An incomplete upload expires after 24 hours. `ETAG_STYLE=md5` returns Google Drive's file MD5 for completed multipart objects; `ETAG_STYLE=multipart` is available only for clients that require an S3-style composite ETag.
+Parts must be uploaded strictly in consecutive order beginning at part 1. Parts are immutable after they have committed. Default part size recommended and returned by the API is 8 MiB (aligned to Google Drive 256 KiB chunks). An incomplete upload expires after 24 hours. `ETAG_STYLE=md5` returns Google Drive's file MD5 for completed multipart objects; `ETAG_STYLE=multipart` is available only for clients that require an S3-style composite ETag.
 
 ## Quotas and plan limits
 

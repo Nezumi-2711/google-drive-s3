@@ -2,6 +2,7 @@ import { jsonResponse, verifySessionToken } from "./auth-api";
 import { handleBucketRoutes, handleImportCandidatesRoute, handleImportRoute } from "./bucket-api";
 import { getBucketRegistry } from "./bucket-registry";
 import { getAccessToken, getDriveAbout, getRootFolderId, listObjects } from "./google-drive";
+import { handleObjectRoutes, handleTicketDownload } from "./object-api";
 import type { DriveAbout, Env } from "./types";
 
 export const API_PATH_PREFIX = "api";
@@ -75,11 +76,6 @@ export async function handleApi(request: Request, env: Env, subPath: string): Pr
             return jsonResponse({ message: "Dashboard authentication is not configured" }, 503);
         }
 
-        const isValid = await verifySessionToken(request, env);
-        if (!isValid) {
-            return jsonResponse({ message: "Session expired or invalid" }, 401);
-        }
-
         if (!env.DRIVE_ROOT_FOLDER || env.DRIVE_ROOT_FOLDER.trim() === "") {
             return jsonResponse({ message: "Storage root folder is not configured" }, 503);
         }
@@ -87,8 +83,17 @@ export async function handleApi(request: Request, env: Env, subPath: string): Pr
         const segments = subPath.split("/").filter(Boolean);
         const firstSegment = segments[0] || "";
         const remainingSegments = segments.slice(1);
-
         const url = new URL(request.url);
+
+        // Ticket download does not require session token (uses 120s random token)
+        if (firstSegment === "objects" && remainingSegments[0] === "content" && url.searchParams.has("ticket")) {
+            return await handleTicketDownload(request, env);
+        }
+
+        const isValid = await verifySessionToken(request, env);
+        if (!isValid) {
+            return jsonResponse({ message: "Session expired or invalid" }, 401);
+        }
 
         if (firstSegment === "status") {
             if (request.method !== "GET") return jsonResponse({ message: "Method Not Allowed" }, 405);
@@ -101,6 +106,10 @@ export async function handleApi(request: Request, env: Env, subPath: string): Pr
                 return await handleBuckets(env, forceRefresh);
             }
             return await handleBucketRoutes(request, env, remainingSegments);
+        }
+
+        if (firstSegment === "objects") {
+            return await handleObjectRoutes(request, env, remainingSegments);
         }
 
         if (firstSegment === "import-candidates") {

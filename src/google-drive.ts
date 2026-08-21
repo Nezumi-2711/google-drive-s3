@@ -20,10 +20,15 @@ function driveLiteral(value: string): string {
     return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
 
-function driveFilesUrl(q: string, fields: string): string {
+function driveFilesUrl(q: string, fields: string, pageToken?: string): string {
     const url = new URL("https://www.googleapis.com/drive/v3/files");
     url.searchParams.set("q", q);
-    url.searchParams.set("fields", fields);
+    url.searchParams.set("pageSize", "1000");
+    const fieldsWithPageToken = fields.includes("nextPageToken") ? fields : `nextPageToken,${fields}`;
+    url.searchParams.set("fields", fieldsWithPageToken);
+    if (pageToken) {
+        url.searchParams.set("pageToken", pageToken);
+    }
     return url.toString();
 }
 
@@ -136,13 +141,23 @@ export async function getOrCreateFolder(accessToken: string, folderName: string,
 }
 
 export async function listFolderChildren(accessToken: string, folderId: string, fields = "files(id,name,mimeType,size,modifiedTime,createdTime,appProperties)"): Promise<GoogleDriveFile[]> {
-    const listRes = await fetch(driveFilesUrl(`'${driveLiteral(folderId)}' in parents and trashed=false`, fields), {
-        headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!listRes.ok) throw new Error(`Drive list failed: ${await listRes.text()}`);
+    const allFiles: GoogleDriveFile[] = [];
+    let pageToken: string | undefined;
 
-    const data: GoogleDriveSearchResponse = await listRes.json();
-    return data.files || [];
+    do {
+        const listRes = await fetch(driveFilesUrl(`'${driveLiteral(folderId)}' in parents and trashed=false`, fields, pageToken), {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!listRes.ok) throw new Error(`Drive list failed: ${await listRes.text()}`);
+
+        const data: GoogleDriveSearchResponse = await listRes.json();
+        if (data.files) {
+            allFiles.push(...data.files);
+        }
+        pageToken = data.nextPageToken;
+    } while (pageToken);
+
+    return allFiles;
 }
 
 export async function folderHasChildren(accessToken: string, folderId: string): Promise<boolean> {
@@ -174,6 +189,31 @@ export async function updateDriveFile(accessToken: string, fileId: string, body:
     });
     if (!res.ok) throw new Error(`Drive file update failed: ${await res.text()}`);
     return (await res.json()) as GoogleDriveFile;
+}
+
+/** Resolves an S3 object key to its existing parent folder ID without creating folders. Returns null if parent hierarchy doesn't exist. */
+export async function resolvePathToExistingFolderAndFile(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<{ parentFolderId: string; fileName: string } | null> {
+    let currentFolderId = await findBucketFolderId(accessToken, bucket, env);
+    if (!currentFolderId) return null;
+
+    const parts = objectKey.split("/").filter((p) => p);
+    if (parts.length === 0) {
+        throw new Error("Invalid object key");
+    }
+
+    const fileName = parts[parts.length - 1];
+    const directories = parts.slice(0, -1);
+
+    for (const dir of directories) {
+        const nextFolderId = await findFolderId(accessToken, dir, currentFolderId);
+        if (!nextFolderId) return null;
+        currentFolderId = nextFolderId;
+    }
+
+    return {
+        parentFolderId: currentFolderId,
+        fileName: fileName,
+    };
 }
 
 /** Resolves an S3 object key to its parent folder ID, creating the directory hierarchy as needed. */
@@ -265,7 +305,11 @@ export async function findFileInFolder(accessToken: string, folderId: string, fi
 }
 
 export async function streamDownloadFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env, range?: string): Promise<DriveDownloadResult> {
-    const { parentFolderId, fileName } = await resolvePathToFolderAndFile(accessToken, bucket, objectKey, env);
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env);
+    if (!resolved) {
+        throw new Error("File not found");
+    }
+    const { parentFolderId, fileName } = resolved;
     const file = await findFileInFolder(accessToken, parentFolderId, fileName);
 
     if (!file) {
@@ -305,7 +349,11 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
 }
 
 export async function deleteFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<void> {
-    const { parentFolderId, fileName } = await resolvePathToFolderAndFile(accessToken, bucket, objectKey, env);
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env);
+    if (!resolved) {
+        throw new Error("File not found");
+    }
+    const { parentFolderId, fileName } = resolved;
     const file = await findFileInFolder(accessToken, parentFolderId, fileName);
 
     if (!file) {
@@ -323,7 +371,11 @@ export async function deleteFromDrive(accessToken: string, bucket: string, objec
 }
 
 export async function getFileMetadata(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<DriveFileMetadata> {
-    const { parentFolderId, fileName } = await resolvePathToFolderAndFile(accessToken, bucket, objectKey, env);
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env);
+    if (!resolved) {
+        throw new Error("File not found");
+    }
+    const { parentFolderId, fileName } = resolved;
     const file = await findFileInFolder(accessToken, parentFolderId, fileName);
 
     if (!file) {
@@ -340,13 +392,23 @@ export async function getFileMetadata(accessToken: string, bucket: string, objec
 }
 
 async function listChildren(accessToken: string, folderId: string): Promise<GoogleDriveFile[]> {
-    const listRes = await fetch(driveFilesUrl(`'${driveLiteral(folderId)}' in parents and trashed=false`, "files(id,name,mimeType,size,modifiedTime,md5Checksum)"), {
-        headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!listRes.ok) throw new Error(`Drive list failed: ${await listRes.text()}`);
+    const allFiles: GoogleDriveFile[] = [];
+    let pageToken: string | undefined;
 
-    const data: GoogleDriveSearchResponse = await listRes.json();
-    return data.files || [];
+    do {
+        const listRes = await fetch(driveFilesUrl(`'${driveLiteral(folderId)}' in parents and trashed=false`, "files(id,name,mimeType,size,modifiedTime,md5Checksum)", pageToken), {
+            headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!listRes.ok) throw new Error(`Drive list failed: ${await listRes.text()}`);
+
+        const data: GoogleDriveSearchResponse = await listRes.json();
+        if (data.files) {
+            allFiles.push(...data.files);
+        }
+        pageToken = data.nextPageToken;
+    } while (pageToken);
+
+    return allFiles;
 }
 
 /** Splits an S3 prefix into the directory portion (real Drive folder path) and the partial name filter for the final segment. */
