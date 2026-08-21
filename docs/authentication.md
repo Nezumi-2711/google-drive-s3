@@ -5,7 +5,19 @@ The Worker accepts AWS Signature Version 4 in either form:
 - an `Authorization: AWS4-HMAC-SHA256 …` header with `x-amz-date`; or
 - a presigned request with `X-Amz-Algorithm`, `X-Amz-Credential`, `X-Amz-Date`, `X-Amz-SignedHeaders`, and `X-Amz-Signature` query parameters.
 
-The `Credential` access-key ID must equal the Worker's `ACCESS_KEY`; the signing key is derived from `SECRET_KEY`, `REGION`, service `s3`, and the `YYYYMMDD` request date.
+The `Credential` access-key ID is looked up in the gateway's access-key store (managed from the dashboard under `/api/integration/keys`); the signing key is derived from that key's secret, `REGION`, service `s3`, and the `YYYYMMDD` request date. Unknown or expired key IDs are rejected with `403 AccessDenied`.
+
+## Access keys
+
+S3 credentials are named key pairs stored in `AUTH_KV` (`s3-credentials`), managed via the dashboard:
+
+- Up to 5 live keys — one per integration, revocable independently.
+- Rotation creates a replacement with the same label; the old key either dies immediately (`graceSeconds: 0`) or keeps authenticating for a grace period of 1 hour, 24 hours, or 7 days.
+- The legacy `ACCESS_KEY`/`SECRET_KEY` secrets act as **bootstrap only**: on first use they are seeded into the store and are superseded by dashboard-managed keys afterwards.
+
+Key changes are edge-cached for up to **60 seconds**. A rotated-away or revoked key may continue to authenticate for at most one minute after the change.
+
+Secrets are stored readable in KV because SigV4 verification must derive the signing key from the raw secret — they cannot be hashed. Treat dashboard sessions as full credential access.
 
 ## Presigned URL expiry
 

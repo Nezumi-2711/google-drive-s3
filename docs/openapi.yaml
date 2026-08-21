@@ -122,6 +122,157 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/AuthError' }
+  /api/integration:
+    get:
+      tags: [Dashboard Status]
+      operationId: getIntegrationInfo
+      summary: Get S3 connection details and access keys
+      description: Everything an external S3 client needs — endpoint, region, path-style flag, bucket list and the current access keys (metadata only, no secrets).
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Integration info with access key metadata.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IntegrationInfo' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '503':
+          description: Storage root folder or authentication not configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/integration/keys:
+    post:
+      tags: [Dashboard Status]
+      operationId: createAccessKey
+      summary: Create a named S3 access key pair
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAccessKeyRequest' }
+      responses:
+        '201':
+          description: Key pair created. The secret is only returned here.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/S3AccessKeyFull' }
+        '400':
+          description: Invalid label or the maximum of 5 live keys was reached.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/integration/keys/{id}/rotate:
+    post:
+      tags: [Dashboard Status]
+      operationId: rotateAccessKey
+      summary: Rotate an access key with an optional grace period
+      description: Creates a replacement key carrying the same label. The old key is deleted immediately when graceSeconds is 0, otherwise it keeps authenticating until the grace period elapses. Changes propagate within 60 seconds due to edge caching.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RotateAccessKeyRequest' }
+      responses:
+        '200':
+          description: Rotation result with the new full pair and the old key's retirement timestamp.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RotateAccessKeyResponse' }
+        '400':
+          description: Invalid graceSeconds value.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '404':
+          description: Access key not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/integration/keys/{id}/secret:
+    get:
+      tags: [Dashboard Status]
+      operationId: revealAccessKeySecret
+      summary: Reveal an access key secret
+      description: Rate-limited to 20 reveals per IP per 60 seconds.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The secret access key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccessKeySecret' }
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '404':
+          description: Access key not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '429':
+          description: Too many reveal attempts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+  /api/integration/keys/{id}:
+    delete:
+      tags: [Dashboard Status]
+      operationId: revokeAccessKey
+      summary: Revoke an access key immediately
+      description: Deleting the last remaining key locks out all S3 clients until a new key is created. Propagates within 60 seconds.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Access key revoked.
+        '401':
+          description: Invalid or expired session.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
+        '404':
+          description: Access key not found.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthError' }
   /api/buckets:
     get:
       tags: [Dashboard Status]
@@ -1216,3 +1367,79 @@ components:
         NextUploadIdMarker: { type: string }
         MaxUploads: { type: integer, example: 1000 }
         IsTruncated: { type: boolean, example: false }
+    S3AccessKeyMetadata:
+      type: object
+      required: [accessKeyId, label, createdAt, expiresAt]
+      properties:
+        accessKeyId: { type: string, example: GDS7Q2JXK4M9VBTZRWEA }
+        label: { type: string, example: rclone-backup }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true, description: Set when the key is retiring after a rotation. }
+    S3AccessKeyFull:
+      type: object
+      required: [accessKeyId, secretAccessKey, label, createdAt, expiresAt]
+      properties:
+        accessKeyId: { type: string, example: GDS7Q2JXK4M9VBTZRWEA }
+        secretAccessKey: { type: string, description: Only returned on creation and reveal. }
+        label: { type: string, example: rclone-backup }
+        createdAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time, nullable: true }
+    CreateAccessKeyRequest:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-zA-Z0-9 _-]+$'
+          example: n8n-media-uploads
+    RotateAccessKeyRequest:
+      type: object
+      required: [graceSeconds]
+      properties:
+        graceSeconds:
+          type: integer
+          enum: [0, 3600, 86400, 604800]
+          description: 0 revokes the old key immediately; otherwise the old key keeps working for this long.
+          default: 86400
+    RotateAccessKeyResponse:
+      type: object
+      required: [created, previous]
+      properties:
+        created: { $ref: '#/components/schemas/S3AccessKeyFull' }
+        previous:
+          type: object
+          required: [accessKeyId, expiresAt]
+          properties:
+            accessKeyId: { type: string }
+            expiresAt: { type: string, format: date-time, nullable: true }
+    AccessKeySecret:
+      type: object
+      required: [secretAccessKey]
+      properties:
+        secretAccessKey: { type: string }
+    IntegrationInfo:
+      type: object
+      required: [endpoint, region, forcePathStyle, buckets, publicReadBuckets, multipartEnabled, etagStyle, corsOrigins, docsUrl, openApiUrl, accessKeys, limits]
+      properties:
+        endpoint: { type: string, format: uri, example: https://s3-google-drive.example.workers.dev }
+        region: { type: string, example: auto }
+        forcePathStyle: { type: boolean, const: true }
+        buckets: { type: array, items: { type: string } }
+        publicReadBuckets: { type: array, items: { type: string } }
+        multipartEnabled: { type: boolean }
+        etagStyle: { type: string, enum: [md5, multipart] }
+        corsOrigins: { type: array, items: { type: string } }
+        docsUrl: { type: string, nullable: true }
+        openApiUrl: { type: string, nullable: true }
+        accessKeys:
+          type: array
+          items: { $ref: '#/components/schemas/S3AccessKeyMetadata' }
+        limits:
+          type: object
+          required: [maxAccessKeys, keyPropagationSeconds, presignExpiryMaxSeconds]
+          properties:
+            maxAccessKeys: { type: integer, example: 5 }
+            keyPropagationSeconds: { type: integer, example: 60, description: Edge-cache TTL — revoke/rotate take up to this long to propagate. }
+            presignExpiryMaxSeconds: { type: integer, example: 604800 }

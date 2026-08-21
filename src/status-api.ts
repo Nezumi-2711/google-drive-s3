@@ -2,6 +2,7 @@ import { jsonResponse, verifySessionToken } from "./auth-api";
 import { handleBucketRoutes, handleImportCandidatesRoute, handleImportRoute } from "./bucket-api";
 import { getBucketRegistry } from "./bucket-registry";
 import { getAccessToken, getDriveAbout, getRootFolderId, listObjects } from "./google-drive";
+import { handleIntegrationRoutes, hasLiveS3Keys } from "./integration-api";
 import { handleObjectRoutes, handleTicketDownload } from "./object-api";
 import type { DriveAbout, Env } from "./types";
 
@@ -100,6 +101,10 @@ export async function handleApi(request: Request, env: Env, subPath: string): Pr
             return await handleStatus(env);
         }
 
+        if (firstSegment === "integration") {
+            return await handleIntegrationRoutes(request, env, remainingSegments);
+        }
+
         if (firstSegment === "buckets") {
             if (request.method === "GET" && remainingSegments.length === 0) {
                 const forceRefresh = url.searchParams.get("refresh") === "1";
@@ -181,6 +186,8 @@ async function handleStatus(env: Env): Promise<Response> {
 
     const driveConnected = driveAbout !== null && driveError === null;
 
+    const s3KeysConfigured = await hasLiveS3Keys(env);
+
     const payload: GatewayStatusResponse = {
         gateway: {
             status: driveConnected ? "ok" : "degraded",
@@ -197,7 +204,7 @@ async function handleStatus(env: Env): Promise<Response> {
             },
             corsOrigins,
             credentials: {
-                s3Keys: Boolean(env.ACCESS_KEY && env.SECRET_KEY),
+                s3Keys: s3KeysConfigured,
                 googleOAuth: Boolean(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET && env.GOOGLE_REFRESH_TOKEN),
                 dashboardPassword: Boolean(env.DASHBOARD_PASSWORD),
             },

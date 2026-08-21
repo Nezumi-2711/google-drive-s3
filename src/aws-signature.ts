@@ -1,3 +1,4 @@
+import { findAccessKey } from "./credentials";
 import type { S3ErrorCode } from "./s3-errors";
 import type { Env } from "./types";
 
@@ -172,9 +173,12 @@ export async function verifySignature(request: Request, env: Env): Promise<Verif
     const date = datetime.substring(0, 8);
     const credential = isQueryAuth ? (url.searchParams.get("X-Amz-Credential") ?? "") : (/Credential=([^,\s]+)/.exec(headers.get("Authorization") ?? "")?.[1] ?? "");
     const credentialParts = credential.split("/");
-    if (credentialParts.length !== 5 || credentialParts[0] !== env.ACCESS_KEY || credentialParts.slice(1).join("/") !== `${date}/${env.REGION}/s3/aws4_request`) {
+    if (credentialParts.length !== 5 || credentialParts.slice(1).join("/") !== `${date}/${env.REGION}/s3/aws4_request`) {
         return { ok: false, code: "AccessDenied" };
     }
+
+    const key = await findAccessKey(env, credentialParts[0]);
+    if (!key) return { ok: false, code: "AccessDenied" };
 
     const canonicalRequest = await createCanonicalRequest(request, isQueryAuth);
     const hashedCanonicalRequest = await sha256(canonicalRequest);
@@ -182,7 +186,7 @@ export async function verifySignature(request: Request, env: Env): Promise<Verif
     const credentialScope = `${date}/${env.REGION}/s3/aws4_request`;
     const stringToSign = ["AWS4-HMAC-SHA256", datetime, credentialScope, hashedCanonicalRequest].join("\n");
 
-    const signingKey = await getSigningKey(env.SECRET_KEY, date, env.REGION, "s3");
+    const signingKey = await getSigningKey(key.secretAccessKey, date, env.REGION, "s3");
     const signature = await hmacSha256(signingKey, stringToSign);
     const signatureHex = bufToHex(signature);
 

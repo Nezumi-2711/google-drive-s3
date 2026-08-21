@@ -71,8 +71,8 @@ https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboa
 
 | Key | Description |
 | :--- | :--- |
-| `ACCESS_KEY` | Any access key used by the S3 client. |
-| `SECRET_KEY` | A secure secret key used by the S3 client. |
+| `ACCESS_KEY` | **Bootstrap only.** Seeded into the dashboard-managed access-key store on first use and superseded by it afterwards — manage keys from the dashboard's Integration page. |
+| `SECRET_KEY` | **Bootstrap only.** Pairs with `ACCESS_KEY` for the initial seed; ignored once the store exists. |
 | `REGION` | The region used by the S3 client. |
 | `GOOGLE_CLIENT_ID`,  `GOOGLE_CLIENT_SECRET`,   `GOOGLE_REFRESH_TOKEN` | Google API credentials obtained from rclone. |
 | `DASHBOARD_PASSWORD` | *(Optional)* Plaintext password for dashboard management API authentication. |
