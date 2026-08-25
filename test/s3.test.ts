@@ -116,6 +116,43 @@ describe("S3 compatibility", () => {
         expect(await response.text()).toBe("hello");
     });
 
+    it("verifies GetObject signatures with Accept-Encoding: identity (aws-sdk-go-v2 signs identity on every operation)", async () => {
+        await worker.fetch(await signed("/test-bucket/ae-get-identity.txt", { method: "PUT", body: "hello", headers: { "accept-encoding": "identity" } }), ENV, CTX);
+        const original = await signed("/test-bucket/ae-get-identity.txt?x-id=GetObject", { method: "GET", headers: { "accept-encoding": "identity" } });
+        const rewrittenHeaders = new Headers(original.headers);
+        rewrittenHeaders.set("accept-encoding", "gzip, br");
+        const mutated = new Request(original, { headers: rewrittenHeaders });
+
+        const response = await worker.fetch(mutated, ENV, CTX);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("hello");
+    });
+
+    it("verifies GetObject signatures against an unusual Accept-Encoding recovered from request.cf.clientAcceptEncoding", async () => {
+        await worker.fetch(await signed("/test-bucket/ae-get-cf.txt", { method: "PUT", body: "hello" }), ENV, CTX);
+        const original = await signed("/test-bucket/ae-get-cf.txt", { method: "GET", headers: { "accept-encoding": "deflate" } });
+        const rewrittenHeaders = new Headers(original.headers);
+        rewrittenHeaders.set("accept-encoding", "gzip, br");
+        const mutated = new Request(original, { headers: rewrittenHeaders, cf: { clientAcceptEncoding: "deflate" } } as RequestInit);
+
+        const response = await worker.fetch(mutated, ENV, CTX);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("hello");
+    });
+
+    it("still rejects a GET whose signature matches no plausible Accept-Encoding value", async () => {
+        await worker.fetch(await signed("/test-bucket/ae-get-bad.txt", { method: "PUT", body: "hello" }), ENV, CTX);
+        const original = await signed("/test-bucket/ae-get-bad.txt", { method: "GET", headers: { "accept-encoding": "identity" } });
+        const tampered = new Headers(original.headers);
+        tampered.set("accept-encoding", "gzip, br");
+        tampered.set("x-amz-content-sha256", "UNSIGNED-PAYLOAD-TAMPERED");
+        const mutated = new Request(original, { headers: tampered });
+
+        const response = await worker.fetch(mutated, ENV, CTX);
+        expect(response.status).toBe(403);
+        expect(await response.text()).toContain("<Code>SignatureDoesNotMatch</Code>");
+    });
+
     it("verifies signatures for requests carrying the aws-sdk-go x-id tracing param (rclone/AWS CLI v2 GetObject)", async () => {
         // aws-sdk-go-v2 (used by rclone) signs the x-id param as part of the request by default
         // (opt.UseXID defaults to true) — it's part of the canonical query string, not appended

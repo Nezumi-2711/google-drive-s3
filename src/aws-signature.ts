@@ -36,28 +36,43 @@ async function getSigningKey(secret: string, date: string, region: string, servi
 }
 
 /**
- * aws-sdk-go-v2 (used by rclone/AWS CLI v2) signs Accept-Encoding as "gzip" specifically for
- * GetObject — it wants a compressed transfer of the object body — but as "identity" for every
- * other operation (HeadObject, ListObjectsV2, PutObject, multipart list/parts), since those
- * don't return arbitrary object data. Confirmed by capturing rclone's own raw outgoing requests:
- * HEAD and GET-without-key send "identity"; GET-with-key (GetObject) sends "gzip". Cloudflare's
- * edge always rewrites the incoming header before the Worker sees it, so the literal value can
- * never be read back — this replicates what the client actually signed instead.
+ * Clients that sign `Accept-Encoding` don't agree on the value they sign, and the value delivered
+ * to the Worker is not necessarily the one that was signed:
  *
- * This is a best-effort fallback: some proxies between the client and this Worker (including
- * Cloudflare's own edge) can still rewrite Accept-Encoding in ways clients don't anticipate,
- * which is why rclone/aws-sdk-go-v2 also expose `--s3-sign-accept-encoding=false` to drop this
- * header from what's signed entirely — see the "Accept-Encoding" note in the README.
+ *   - aws-sdk-go-v2 (memos and most Go S3 clients) sets and signs "identity" on every operation,
+ *     GetObject included, because it disables the transport's automatic gzip handling.
+ *   - rclone / AWS CLI v2 sign "gzip" for GetObject when gzip transfer is enabled, "identity" for
+ *     everything else. Confirmed by capturing rclone's own raw outgoing requests.
+ *   - Browsers and BFF clients sign whatever they actually sent, if they sign the header at all.
+ *
+ * Cloudflare's edge rewrites the incoming Accept-Encoding before the Worker sees it (typically to
+ * "gzip, br"), so the delivered header cannot be compared against what was signed. `request.cf`
+ * exposes the pre-rewrite value as `clientAcceptEncoding` whenever the edge changed it; where that
+ * is missing (local dev, or no rewrite happened) we fall back to trying each value a real client
+ * plausibly signs. Trying several candidates only varies this one header's canonical value — the
+ * signature must still be produced with the secret key — so it costs a few extra HMACs rather than
+ * any authentication strength. Clients that still can't be matched can drop the header from the
+ * signature entirely (rclone: `--s3-sign-accept-encoding=false`); see docs/authentication.md.
  */
-function isGetObjectRequest(method: string, url: URL): boolean {
-    if (method !== "GET") return false;
-    if (url.searchParams.has("uploadId") || url.searchParams.has("uploads")) return false;
-    return url.pathname.split("/").filter(Boolean).length > 1;
+function acceptEncodingCandidates(request: Request): string[] {
+    const raw = [(request.cf as IncomingRequestCfProperties | undefined)?.clientAcceptEncoding, request.headers.get("accept-encoding") ?? undefined, "identity", "gzip", ""];
+
+    const candidates: string[] = [];
+    for (const value of raw) {
+        if (value === undefined) continue;
+        const trimmed = value.trim();
+        if (!candidates.includes(trimmed)) candidates.push(trimmed);
+    }
+    return candidates;
 }
 
-async function createCanonicalRequest(request: Request, isQueryAuth: boolean): Promise<string> {
-    const url = new URL(request.url);
+function getSignedHeadersList(request: Request, url: URL, isQueryAuth: boolean): string[] {
+    if (isQueryAuth) return (url.searchParams.get("X-Amz-SignedHeaders") ?? "host").split(";");
+    const match = (request.headers.get("Authorization") ?? "").match(/SignedHeaders=([^,\s]+)/);
+    return match ? match[1].split(";") : ["host"];
+}
 
+function createCanonicalRequest(request: Request, url: URL, signedHeadersList: string[], acceptEncoding: string): string {
     const method = request.method;
     const canonicalUri = url.pathname || "/";
 
@@ -72,15 +87,6 @@ async function createCanonicalRequest(request: Request, isQueryAuth: boolean): P
         .map(([key, val]) => `${encodeRFC3986(key)}=${encodeRFC3986(val)}`)
         .join("&");
 
-    let signedHeadersList: string[];
-    if (isQueryAuth) {
-        signedHeadersList = (url.searchParams.get("X-Amz-SignedHeaders") ?? "host").split(";");
-    } else {
-        const authHeader = request.headers.get("Authorization") ?? "";
-        const match = authHeader.match(/SignedHeaders=([^,\s]+)/);
-        signedHeadersList = match ? match[1].split(";") : ["host"];
-    }
-
     const canonicalHeaders = signedHeadersList
         .map((h) => {
             const headerName = h.toLowerCase();
@@ -93,7 +99,7 @@ async function createCanonicalRequest(request: Request, isQueryAuth: boolean): P
                     headerValue += `:${port}`;
                 }
             } else if (headerName === "accept-encoding") {
-                headerValue = isGetObjectRequest(method, url) ? "gzip" : "identity";
+                headerValue = acceptEncoding;
             } else {
                 headerValue = request.headers.get(headerName)?.trim() ?? "";
             }
@@ -180,24 +186,28 @@ export async function verifySignature(request: Request, env: Env): Promise<Verif
     const key = await findAccessKey(env, credentialParts[0]);
     if (!key) return { ok: false, code: "AccessDenied" };
 
-    const canonicalRequest = await createCanonicalRequest(request, isQueryAuth);
-    const hashedCanonicalRequest = await sha256(canonicalRequest);
-
-    const credentialScope = `${date}/${env.REGION}/s3/aws4_request`;
-    const stringToSign = ["AWS4-HMAC-SHA256", datetime, credentialScope, hashedCanonicalRequest].join("\n");
-
-    const signingKey = await getSigningKey(key.secretAccessKey, date, env.REGION, "s3");
-    const signature = await hmacSha256(signingKey, stringToSign);
-    const signatureHex = bufToHex(signature);
-
     let expectedSignature = "";
     if (isQueryAuth) {
         expectedSignature = url.searchParams.get("X-Amz-Signature") ?? "";
     } else {
-        const authHeader = headers.get("Authorization") ?? "";
-        const match = authHeader.match(/Signature=([a-fA-F0-9]+)/);
+        const match = (headers.get("Authorization") ?? "").match(/Signature=([a-fA-F0-9]+)/);
         expectedSignature = match ? match[1] : "";
     }
 
-    return constantTimeEqual(signatureHex, expectedSignature) ? { ok: true } : signatureMismatch();
+    const credentialScope = `${date}/${env.REGION}/s3/aws4_request`;
+    const signingKey = await getSigningKey(key.secretAccessKey, date, env.REGION, "s3");
+
+    const signedHeadersList = getSignedHeadersList(request, url, isQueryAuth);
+    // Only the accept-encoding value is ambiguous; every other signed header is reproduced verbatim.
+    const candidates = signedHeadersList.some((h) => h.toLowerCase() === "accept-encoding") ? acceptEncodingCandidates(request) : [""];
+
+    for (const acceptEncoding of candidates) {
+        const canonicalRequest = createCanonicalRequest(request, url, signedHeadersList, acceptEncoding);
+        const hashedCanonicalRequest = await sha256(canonicalRequest);
+        const stringToSign = ["AWS4-HMAC-SHA256", datetime, credentialScope, hashedCanonicalRequest].join("\n");
+        const signatureHex = bufToHex(await hmacSha256(signingKey, stringToSign));
+        if (constantTimeEqual(signatureHex, expectedSignature)) return { ok: true };
+    }
+
+    return signatureMismatch();
 }

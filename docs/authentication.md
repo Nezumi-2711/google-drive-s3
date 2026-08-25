@@ -40,7 +40,7 @@ The canonical request is built from:
 5. the signed-header list; and
 6. `x-amz-content-sha256`, defaulting to `UNSIGNED-PAYLOAD`.
 
-The Worker deliberately canonicalizes a signed `accept-encoding` header to `identity`. Cloudflare can rewrite the received value at the edge; S3 SDKs that sign this header use `identity` for this reason. Browser code must not sign `accept-encoding` because browser networking controls it.
+A signed `accept-encoding` header gets special treatment. Cloudflare rewrites the received value at the edge (usually to `gzip, br`), so the delivered header cannot be compared against what the client signed, and clients disagree on the value anyway: aws-sdk-go-v2 (memos and most Go clients) signs `identity` on every operation, while rclone and AWS CLI v2 sign `gzip` for `GetObject` and `identity` elsewhere. The Worker therefore verifies against the pre-rewrite value in `request.cf.clientAcceptEncoding` when the edge supplies it, and otherwise retries the signature against each value a client plausibly signs (the delivered header, `identity`, `gzip`, empty). Only this header's canonical value varies — the signature must still be produced with the secret key. Clients that sign some other value can drop the header from the signature instead (rclone: `--s3-sign-accept-encoding=false`). Browser code must not sign `accept-encoding` because browser networking controls it.
 
 Payload hashes are **not** verified. Browser and BFF clients should use `x-amz-content-sha256: UNSIGNED-PAYLOAD`; this is a deliberate streaming limitation, not an integrity guarantee.
 
