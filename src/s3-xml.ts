@@ -30,6 +30,12 @@ export function generateListBucketResult(bucket: string, prefix: string, delimit
 </ListBucketResult>`;
 }
 
+/** Always reports versioning as never-enabled: this backend has no object versioning. */
+export function bucketVersioningResult(): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<VersioningConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>`;
+}
+
 export function initiateMultipartUploadResult(bucket: string, key: string, uploadId: string): string {
     return `<?xml version="1.0" encoding="UTF-8"?>
 <InitiateMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Bucket>${escapeXml(bucket)}</Bucket><Key>${escapeXml(key)}</Key><UploadId>${escapeXml(uploadId)}</UploadId></InitiateMultipartUploadResult>`;

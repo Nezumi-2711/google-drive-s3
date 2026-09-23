@@ -513,6 +513,15 @@ describe("S3 compatibility", () => {
         expect(dir1RecursiveXml).toContain("<Key>dir1/sub/b.txt</Key>");
         expect(dir1RecursiveXml).not.toContain("<CommonPrefixes>");
     });
+
+    it("reports bucket versioning as never-enabled instead of falling through to ListBucketResult (minio-go's GetBucketVersioning, used by Forgejo/Gitea storage init, rejects the latter)", async () => {
+        const response = await worker.fetch(await signed("/test-bucket?versioning", { method: "GET" }), ENV, CTX);
+        expect(response.status).toBe(200);
+        const xml = await response.text();
+        expect(xml).toContain("<VersioningConfiguration");
+        expect(xml).not.toContain("<ListBucketResult");
+        expect(xml).not.toContain("<Status>");
+    });
 });
 
 function streamOf(chunks: Uint8Array[]): ReadableStream<Uint8Array> {

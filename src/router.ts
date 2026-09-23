@@ -1,7 +1,7 @@
 import { deleteFromDrive, getFileMetadata, listObjects, streamDownloadFromDrive, streamUploadToDrive } from "./google-drive";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, etag, listMultipartParts, MAX_COMPLETE_XML, parsePositiveInt, uploadPartCore } from "./multipart-core";
 import { S3Exception, s3Error } from "./s3-errors";
-import { completeMultipartUploadResult, generateListBucketResult, initiateMultipartUploadResult, listMultipartUploadsResult, listPartsResult, parseCompleteMultipartUpload } from "./s3-xml";
+import { bucketVersioningResult, completeMultipartUploadResult, generateListBucketResult, initiateMultipartUploadResult, listMultipartUploadsResult, listPartsResult, parseCompleteMultipartUpload } from "./s3-xml";
 import type { Env, MultipartPartsList } from "./types";
 
 function xmlResponse(body: string, status = 200): Response {
@@ -89,6 +89,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
     if (method === "PUT" && key) return putObject(request, env, accessToken, bucket, key);
 
     if (method === "GET") {
+        if (!key && url.searchParams.has("versioning")) return xmlResponse(bucketVersioningResult());
         if (!key) {
             const prefix = url.searchParams.get("prefix") ?? "";
             const delimiter = url.searchParams.get("delimiter") ?? undefined;

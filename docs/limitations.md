@@ -20,7 +20,7 @@ Use narrow prefixes and `delimiter=/` for a file browser. Do not build an infini
 - CopyObject and UploadPartCopy
 - discovering active multipart uploads: `ListMultipartUploads` always reports an empty list
 
-Bucket `?acl`, `?versioning`, and `?location` requests are currently treated as regular bucket listing requests rather than errors. Do not rely on this accidental compatibility.
+`GetBucketVersioning` (`?versioning`) reports versioning as never-enabled, since this backend has no object versioning. Bucket `?acl` and `?location` requests are still treated as regular bucket listing requests rather than errors. Do not rely on this accidental compatibility for those two.
 
 ## Directories and objects
 
