@@ -483,6 +483,25 @@ describe("S3 compatibility", () => {
         expect([...drive.files.values()].find((file) => file.name === "chunked.bin")?.data).toEqual(source);
     });
 
+    it("detects aws-chunked framing from x-amz-content-sha256 alone when Content-Encoding is absent (minio-go v7 UploadPart with a streaming-signed payload omits Content-Encoding)", async () => {
+        const source = bytes(4_264);
+        const framed = encodeAwsChunked(source, false);
+        const response = await worker.fetch(
+            await signed("/test-bucket/chunked-no-header.bin", {
+                method: "PUT",
+                body: framed,
+                headers: {
+                    "x-amz-decoded-content-length": String(source.byteLength),
+                    "x-amz-content-sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD",
+                },
+            }),
+            ENV,
+            CTX,
+        );
+        expect(response.status).toBe(200);
+        expect([...drive.files.values()].find((file) => file.name === "chunked-no-header.bin")?.data).toEqual(source);
+    });
+
     it("supports an empty PutObject", async () => {
         const response = await worker.fetch(await signed("/test-bucket/empty", { method: "PUT", body: new Uint8Array() }), ENV, CTX);
         expect(response.status).toBe(200);

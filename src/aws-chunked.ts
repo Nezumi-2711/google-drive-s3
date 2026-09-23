@@ -141,13 +141,21 @@ export async function pumpBody(
     return { written, tail };
 }
 
+/**
+ * Some clients (observed: minio-go v7's multipart UploadPart with a streaming-signed payload)
+ * sign and frame the body as aws-chunked but omit `Content-Encoding: aws-chunked` entirely.
+ * `x-amz-content-sha256` is the authoritative signal per the AWS spec — any of the STREAMING-*
+ * placeholder values (signed, unsigned, with/without trailer) means the body is chunk-framed
+ * regardless of what Content-Encoding says.
+ */
 export function isAwsChunked(request: Request): boolean {
-    return (
+    const contentEncoding =
         request.headers
             .get("content-encoding")
             ?.split(",")
-            .some((encoding) => encoding.trim().toLowerCase() === "aws-chunked") ?? false
-    );
+            .some((encoding) => encoding.trim().toLowerCase() === "aws-chunked") ?? false;
+    if (contentEncoding) return true;
+    return (request.headers.get("x-amz-content-sha256") ?? "").startsWith("STREAMING-");
 }
 
 export function decodedContentLength(request: Request): number | undefined {
