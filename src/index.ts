@@ -40,24 +40,35 @@ export default {
         const bucket = pathParts[0] || "";
         const objectKey = pathParts.slice(1).join("/");
         const resource = url.pathname || "/";
+        const stages: Partial<Record<"registry" | "auth" | "token" | "dispatch", number>> = {};
+        const measure = async <Result>(stage: keyof typeof stages, action: () => Promise<Result>): Promise<Result> => {
+            if (env.ENABLE_TIMING_LOGS !== "true") return action();
+            const stageStartedAt = performance.now();
+            try {
+                return await action();
+            } finally {
+                stages[stage] = Number((performance.now() - stageStartedAt).toFixed(1));
+            }
+        };
         const respond = (response: Response): Response => {
             if (env.ENABLE_TIMING_LOGS === "true") {
-                console.info(JSON.stringify({ type: "s3-timing", method: request.method, hasKey: Boolean(objectKey), status: response.status, durationMs: Date.now() - startedAt }));
+                console.info(JSON.stringify({ type: "s3-timing", method: request.method, hasKey: Boolean(objectKey), hasRange: request.headers.has("Range"), status: response.status, durationMs: Date.now() - startedAt, stages, serverTiming: response.headers.get("Server-Timing") }));
             }
             return withCors(response, request, env);
         };
 
         try {
-            const record = await findBucketRecord(env, bucket);
+            const record = await measure("registry", () => findBucketRecord(env, bucket));
             if (!record) return respond(s3Error("AccessDenied", 403, undefined, resource, request.method === "HEAD"));
 
             const isPublicRead = record.publicRead && (request.method === "GET" || request.method === "HEAD");
-            const signature = isPublicRead ? { ok: true as const } : await verifySignature(request, env);
+            const signature = isPublicRead ? { ok: true as const } : await measure("auth", () => verifySignature(request, env));
             if (!signature.ok) {
                 return respond(s3Error(signature.code, 403, signature.message, resource, request.method === "HEAD"));
             }
 
-            const response = await dispatch(request, env, await getAccessToken(env), bucket, objectKey, record.folderId);
+            const accessToken = await measure("token", () => getAccessToken(env));
+            const response = await measure("dispatch", () => dispatch(request, env, accessToken, bucket, objectKey, record.folderId));
             return respond(response);
         } catch (error) {
             if (error instanceof S3Exception) return respond(s3Error(error.code, error.status, error.message, resource, request.method === "HEAD", error.headers));

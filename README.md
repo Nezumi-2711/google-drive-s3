@@ -120,7 +120,24 @@ Timing entries contain `method`, `status`, and `durationMs`, plus these grouping
 - `type=s3-timing`: `GET` with `hasKey=false` normally means listing; `GET` with `hasKey=true` means content download; `HEAD` with `hasKey=true` means metadata. Multipart queries also use these shapes, so exclude multipart traffic when comparing normal reads.
 - `type=api-timing`: `route=objects` means listing for GET requests, `objects/content` means download, and `objects/metadata` means metadata. `buckets` and `status` identify dashboard reads; other API routes are grouped as `other`.
 
-`durationMs` measures wall-clock time from Worker entry until the response is ready, including authentication, KV access, and upstream work. For streamed downloads it stops after Drive response headers arrive: it does not buffer or consume the body, measure completed transfer time, or include the client-to-Worker network latency. Compare client-side time to first byte and total download time separately. This first measurement identifies the slow workflow, not the individual upstream call responsible.
+`durationMs` measures wall-clock time from Worker entry until the response is ready, including authentication, KV access, and upstream work. For streamed downloads it stops after Drive response headers arrive: it does not buffer or consume the body, measure completed transfer time, or include the client-to-Worker network latency. Compare client-side time to first byte and total download time separately.
+
+S3 timing records also include `hasRange` and `stages` (milliseconds). Stages are recorded only when reached, including when they throw:
+
+- `registry`: bucket registry lookup, including its cache miss work.
+- `auth`: signature verification; absent for public reads.
+- `token`: access-token lookup or refresh after authentication. A cold registry lookup may also obtain a token internally; that cost belongs to `registry`.
+- `dispatch`: the requested operation, including Drive calls.
+
+Successful S3 GET/HEAD object responses and REST content downloads include a `Server-Timing` header, even when timing logs are disabled. S3 logs copy it into `serverTiming`:
+
+- `path`: resolve the parent folder hierarchy.
+- `file`: search for the file and read its metadata.
+- `media`: wait for Drive download response headers; absent for HEAD.
+
+These phase durations are inside `dispatch`, not extra time to add to it. The header contains fixed names and numeric durations only. It does not expose object keys or IDs. Listing and unsuccessful object reads have no phase header (`serverTiming=null`); use their stage durations instead. REST timing logs retain their existing schema. Gitea may not forward storage response headers to the browser, so inspect Worker logs for its S3 calls rather than relying on Gitea DevTools alone.
+
+For slow Gitea Actions logs, enable timing temporarily and open the same completed job two or three times while viewing Worker logs. Compare GET, HEAD, Range usage, response status, and request count during each reproduction. A high `path`/`file` duration suggests repeated lookups; high `media` suggests latency waiting for Drive; a fast Worker response with a slow Gitea page calls for measuring transfer time, retries, and Gitea processing. Request count alone does not prove that calls are sequential. Compare against reading the same object directly from the Gitea host with its S3 client or a short-lived presigned GET URL. Do not change a presigned GET to HEAD with `curl -I`, and do not share credentials, tickets, or signed URLs in logs or support messages.
 
 Compare p50/p95 separately by operation and status, including cold and repeated requests. Timing records use fixed labels and do not include bucket names, object keys, signed URLs, tickets, query strings, or response bodies. Existing error logs are unchanged. Auth, documentation, and OPTIONS routes do not emit these timing records.
 

@@ -64,6 +64,7 @@ export interface DriveDownloadResult {
     status: number;
     contentRange?: string;
     contentLength?: string;
+    serverTiming: string;
 }
 
 export interface DriveFileMetadata {
@@ -72,6 +73,7 @@ export interface DriveFileMetadata {
     size: number;
     md5Checksum?: string;
     modifiedTime?: string;
+    serverTiming: string;
 }
 
 export interface DriveAboutUser {

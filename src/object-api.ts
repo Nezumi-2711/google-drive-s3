@@ -63,6 +63,7 @@ export async function handleTicketDownload(request: Request, env: Env): Promise<
             "Content-Length": result.contentLength || result.size.toString(),
             ETag: `"${etag(result)}"`,
             "Accept-Ranges": "bytes",
+            "Server-Timing": result.serverTiming,
             "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
         });
 
@@ -208,6 +209,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
                     "Content-Length": result.contentLength || result.size.toString(),
                     ETag: `"${etag(result)}"`,
                     "Accept-Ranges": "bytes",
+                    "Server-Timing": result.serverTiming,
                     "Content-Disposition": `attachment; filename="${encodeURIComponent(filename)}"`,
                 });
 

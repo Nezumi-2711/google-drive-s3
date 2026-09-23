@@ -305,12 +305,16 @@ export async function findFileInFolder(accessToken: string, folderId: string, fi
 }
 
 export async function streamDownloadFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env, range?: string, bucketFolderId?: string): Promise<DriveDownloadResult> {
+    const pathStartedAt = performance.now();
     const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, bucketFolderId);
+    const pathDuration = performance.now() - pathStartedAt;
     if (!resolved) {
         throw new Error("File not found");
     }
     const { parentFolderId, fileName } = resolved;
+    const fileStartedAt = performance.now();
     const file = await findFileInFolder(accessToken, parentFolderId, fileName);
+    const fileDuration = performance.now() - fileStartedAt;
 
     if (!file) {
         throw new Error("File not found");
@@ -321,10 +325,12 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
         controller.abort();
     }, 30000);
 
+    const mediaStartedAt = performance.now();
     const downloadRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
         headers: { Authorization: `Bearer ${accessToken}`, ...(range ? { Range: range } : {}) },
         signal: controller.signal,
     });
+    const mediaDuration = performance.now() - mediaStartedAt;
 
     clearTimeout(timeout);
 
@@ -345,6 +351,7 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
         status: downloadRes.status,
         contentRange: downloadRes.headers.get("Content-Range") ?? undefined,
         contentLength: downloadRes.headers.get("Content-Length") ?? undefined,
+        serverTiming: `path;dur=${pathDuration.toFixed(1)}, file;dur=${fileDuration.toFixed(1)}, media;dur=${mediaDuration.toFixed(1)}`,
     };
 }
 
@@ -371,12 +378,16 @@ export async function deleteFromDrive(accessToken: string, bucket: string, objec
 }
 
 export async function getFileMetadata(accessToken: string, bucket: string, objectKey: string, env: Env, bucketFolderId?: string): Promise<DriveFileMetadata> {
+    const pathStartedAt = performance.now();
     const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, bucketFolderId);
+    const pathDuration = performance.now() - pathStartedAt;
     if (!resolved) {
         throw new Error("File not found");
     }
     const { parentFolderId, fileName } = resolved;
+    const fileStartedAt = performance.now();
     const file = await findFileInFolder(accessToken, parentFolderId, fileName);
+    const fileDuration = performance.now() - fileStartedAt;
 
     if (!file) {
         throw new Error("File not found");
@@ -388,6 +399,7 @@ export async function getFileMetadata(accessToken: string, bucket: string, objec
         size: parseInt(file.size || "0", 10),
         md5Checksum: file.md5Checksum,
         modifiedTime: file.modifiedTime,
+        serverTiming: `path;dur=${pathDuration.toFixed(1)}, file;dur=${fileDuration.toFixed(1)}`,
     };
 }
 

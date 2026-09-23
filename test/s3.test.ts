@@ -101,22 +101,31 @@ describe("S3 compatibility", () => {
     });
 
     it.each([
-        { path: "/test-bucket?delimiter=/", method: "GET", hasKey: false, status: 200 },
-        { path: "/test-bucket/private.txt", method: "GET", hasKey: true, status: 200 },
-        { path: "/test-bucket/private.txt", method: "HEAD", hasKey: true, status: 200 },
-        { path: "/test-bucket/missing.txt", method: "GET", hasKey: true, status: 404 },
-        { path: "/missing-bucket/private.txt", method: "GET", hasKey: true, status: 403 },
-    ])("logs opt-in S3 timing without signed URL data for $method $path", async ({ path, method, hasKey, status }) => {
+        { path: "/test-bucket?delimiter=/", method: "GET", hasKey: false, hasRange: false, status: 200 },
+        { path: "/test-bucket/private.txt", method: "GET", hasKey: true, hasRange: false, status: 200 },
+        { path: "/test-bucket/private.txt", method: "GET", hasKey: true, hasRange: true, status: 206 },
+        { path: "/test-bucket/private.txt", method: "HEAD", hasKey: true, hasRange: false, status: 200 },
+        { path: "/test-bucket/missing.txt", method: "GET", hasKey: true, hasRange: false, status: 404 },
+        { path: "/missing-bucket/private.txt", method: "GET", hasKey: true, hasRange: false, status: 403 },
+    ])("logs opt-in S3 timing without signed URL data for $method $path (Range=$hasRange)", async ({ path, method, hasKey, hasRange, status }) => {
         await worker.fetch(await signed("/test-bucket/private.txt", { method: "PUT", body: "private content" }), ENV, CTX);
         const info = vi.spyOn(console, "info").mockImplementation(() => {});
         try {
-            const response = await worker.fetch(await presigned(path, { method }), { ...ENV, ENABLE_TIMING_LOGS: "true" }, CTX);
+            const response = await worker.fetch(await presigned(path, { method, headers: hasRange ? { Range: "bytes=0-6" } : {} }), { ...ENV, ENABLE_TIMING_LOGS: "true" }, CTX);
             expect(response.status).toBe(status);
             expect(info).toHaveBeenCalledTimes(1);
             const entry = JSON.parse(String(info.mock.calls[0][0]));
-            expect(entry).toEqual({ type: "s3-timing", method, hasKey, status, durationMs: expect.any(Number) });
+            const timingPattern = method === "HEAD" ? /^path;dur=\d+\.\d, file;dur=\d+\.\d$/ : /^path;dur=\d+\.\d, file;dur=\d+\.\d, media;dur=\d+\.\d$/;
+            const expectedStages = status === 403 ? { registry: expect.any(Number) } : { registry: expect.any(Number), auth: expect.any(Number), token: expect.any(Number), dispatch: expect.any(Number) };
+            expect(entry).toEqual({ type: "s3-timing", method, hasKey, hasRange, status, durationMs: expect.any(Number), stages: expectedStages, serverTiming: (status === 200 || status === 206) && hasKey ? expect.stringMatching(timingPattern) : null });
             expect(entry.durationMs).toBeGreaterThanOrEqual(0);
-            if (method === "GET" && path.endsWith("/private.txt") && status === 200) {
+            for (const duration of Object.values(entry.stages)) expect(duration).toBeGreaterThanOrEqual(0);
+            expect(entry.serverTiming).toBe(response.headers.get("Server-Timing"));
+            if (hasRange) {
+                expect(response.headers.get("Content-Range")).toBe("bytes 0-6/15");
+                expect(response.headers.get("Content-Length")).toBe("7");
+                expect(await response.text()).toBe("private");
+            } else if (method === "GET" && path.endsWith("/private.txt") && status === 200) {
                 expect(await response.text()).toBe("private content");
             } else {
                 await response.text();

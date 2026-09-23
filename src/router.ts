@@ -102,6 +102,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
                 "Content-Length": file.contentLength ?? file.size.toString(),
                 "Cache-Control": "s-maxage=300, no-store, no-transform",
                 "Accept-Ranges": "bytes",
+                "Server-Timing": file.serverTiming,
                 ETag: `"${etag(file)}"`,
             });
             if (file.contentRange) headers.set("Content-Range", file.contentRange);
@@ -117,7 +118,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
         if (!key) return new Response(null, { status: 200 });
         try {
             const metadata = await getFileMetadata(accessToken, bucket, key, env, bucketFolderId);
-            const headers = new Headers({ "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Cache-Control": "no-transform", "Accept-Ranges": "bytes", ETag: `"${etag(metadata)}"` });
+            const headers = new Headers({ "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Cache-Control": "no-transform", "Accept-Ranges": "bytes", "Server-Timing": metadata.serverTiming, ETag: `"${etag(metadata)}"` });
             if (metadata.modifiedTime) headers.set("Last-Modified", new Date(metadata.modifiedTime).toUTCString());
             return new Response(null, { status: 200, headers });
         } catch (error) {
