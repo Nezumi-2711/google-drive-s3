@@ -15,6 +15,59 @@ const DRIVE_FIELDS = "id,name,size,mimeType,md5Checksum,modifiedTime";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const LIST_NODE_CAP = 5000;
 const ROOT_PARENT = "root";
+const READ_LOOKUP_TTL = 300;
+
+async function lookupCacheKey(kind: "folder" | "file", parentId: string | null, name: string): Promise<string> {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([parentId, name])));
+    return `drive-lookup:v1:${kind}:${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function readLookupCache(env: Env, key: string): Promise<unknown> {
+    if (env.ENABLE_READ_CACHE === "false") return undefined;
+    try {
+        const stored = await env.FOLDER_CACHE.get(key);
+        if (!stored) return undefined;
+        const entry = JSON.parse(stored);
+        if (entry && typeof entry.expiresAt === "number" && entry.expiresAt > Date.now()) return entry.value;
+    } catch {
+        return undefined;
+    }
+    return undefined;
+}
+
+async function writeLookupCache(env: Env, key: string, value: unknown, startedAt: number): Promise<void> {
+    if (env.ENABLE_READ_CACHE === "false" || Date.now() >= startedAt + READ_LOOKUP_TTL * 1000) return;
+    try {
+        await env.FOLDER_CACHE.put(key, JSON.stringify({ expiresAt: startedAt + READ_LOOKUP_TTL * 1000, value }), { expirationTtl: READ_LOOKUP_TTL });
+    } catch {
+        console.warn("Drive lookup cache write failed");
+    }
+}
+
+function isCachedFile(value: unknown, name: string): value is GoogleDriveFile {
+    if (!value || typeof value !== "object") return false;
+    const file = value as Record<string, unknown>;
+    return (
+        typeof file.id === "string" &&
+        file.id.length > 0 &&
+        file.name === name &&
+        typeof file.mimeType === "string" &&
+        typeof file.size === "string" &&
+        /^\d+$/.test(file.size) &&
+        (file.md5Checksum === undefined || typeof file.md5Checksum === "string") &&
+        (file.modifiedTime === undefined || typeof file.modifiedTime === "string")
+    );
+}
+
+export async function invalidateDriveFolderCache(env: Env, parentId: string, name: string): Promise<void> {
+    await env.FOLDER_CACHE.delete(`${parentId}/${name}`);
+    await env.FOLDER_CACHE.delete(await lookupCacheKey("folder", parentId, name));
+}
+
+export async function invalidateDriveObjectCache(env: Env, bucket: string, parentId: string, name: string): Promise<void> {
+    await env.FOLDER_CACHE.delete(await lookupCacheKey("file", parentId, name));
+    await env.FOLDER_CACHE.delete(`bucket-stats:${bucket}`);
+}
 
 function driveLiteral(value: string): string {
     return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
@@ -92,7 +145,14 @@ export async function findBucketFolderId(accessToken: string, bucket: string, en
 }
 
 /** Finds a folder by name under the given parent without creating it. Returns null if absent. */
-export async function findFolderId(accessToken: string, folderName: string, parentId: string | null): Promise<string | null> {
+export async function findFolderId(accessToken: string, folderName: string, parentId: string | null, env?: Env): Promise<string | null> {
+    const startedAt = Date.now();
+    const cacheKey = env && env.ENABLE_READ_CACHE !== "false" ? await lookupCacheKey("folder", parentId, folderName) : undefined;
+    if (env && cacheKey) {
+        const cached = await readLookupCache(env, cacheKey);
+        if (typeof cached === "string" && cached.length > 0) return cached;
+    }
+
     const parentQuery = parentId ? ` and '${parentId}' in parents` : "";
     const searchRes = await fetch(driveFilesUrl(`name='${driveLiteral(folderName)}' and mimeType='${FOLDER_MIME_TYPE}' and trashed=false${parentQuery}`, "files(id,name)"), {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -100,7 +160,9 @@ export async function findFolderId(accessToken: string, folderName: string, pare
     if (!searchRes.ok) throw new Error(`Drive folder search failed: ${await searchRes.text()}`);
 
     const searchData: GoogleDriveSearchResponse = await searchRes.json();
-    return searchData.files && searchData.files.length > 0 ? searchData.files[0].id : null;
+    const folderId = searchData.files && searchData.files.length > 0 ? searchData.files[0].id : null;
+    if (folderId && env && cacheKey) await writeLookupCache(env, cacheKey, folderId, startedAt);
+    return folderId;
 }
 
 /** Finds a folder by name under the given parent, creating it if it doesn't exist yet. */
@@ -113,6 +175,7 @@ export async function getOrCreateFolder(accessToken: string, folderName: string,
     const found = await findFolderId(accessToken, folderName, parentId);
     if (found) {
         await env.FOLDER_CACHE.put(cacheKey, found, { expirationTtl: 3600 });
+        await writeLookupCache(env, await lookupCacheKey("folder", parentId, folderName), found, Date.now());
         return found;
     }
 
@@ -137,6 +200,7 @@ export async function getOrCreateFolder(accessToken: string, folderName: string,
 
     const createData: GoogleDriveCreateResponse = await createRes.json();
     await env.FOLDER_CACHE.put(cacheKey, createData.id, { expirationTtl: 3600 });
+    await writeLookupCache(env, await lookupCacheKey("folder", parentId, folderName), createData.id, Date.now());
     return createData.id;
 }
 
@@ -192,7 +256,7 @@ export async function updateDriveFile(accessToken: string, fileId: string, body:
 }
 
 /** Resolves an S3 object key to its existing parent folder ID without creating folders. Returns null if parent hierarchy doesn't exist. */
-export async function resolvePathToExistingFolderAndFile(accessToken: string, bucket: string, objectKey: string, env: Env, bucketFolderId?: string): Promise<{ parentFolderId: string; fileName: string } | null> {
+export async function resolvePathToExistingFolderAndFile(accessToken: string, bucket: string, objectKey: string, env: Env, bucketFolderId?: string, useReadCache = true): Promise<{ parentFolderId: string; fileName: string } | null> {
     let currentFolderId = bucketFolderId ?? (await findBucketFolderId(accessToken, bucket, env));
     if (!currentFolderId) return null;
 
@@ -205,7 +269,7 @@ export async function resolvePathToExistingFolderAndFile(accessToken: string, bu
     const directories = parts.slice(0, -1);
 
     for (const dir of directories) {
-        const nextFolderId = await findFolderId(accessToken, dir, currentFolderId);
+        const nextFolderId = await findFolderId(accessToken, dir, currentFolderId, useReadCache ? env : undefined);
         if (!nextFolderId) return null;
         currentFolderId = nextFolderId;
     }
@@ -291,29 +355,40 @@ export async function streamUploadToDrive(accessToken: string, request: Request,
         throw new Error(`Upload failed: ${errorText}`);
     }
 
-    return await uploadRes.json();
+    const uploaded = await uploadRes.json<DriveUploadResult>();
+    await invalidateDriveObjectCache(env, bucket, parentFolderId, fileName);
+    return uploaded;
 }
 
-export async function findFileInFolder(accessToken: string, folderId: string, fileName: string): Promise<GoogleDriveFile | null> {
+export async function findFileInFolder(accessToken: string, folderId: string, fileName: string, env?: Env): Promise<GoogleDriveFile | null> {
+    const startedAt = Date.now();
+    const cacheKey = env && env.ENABLE_READ_CACHE !== "false" ? await lookupCacheKey("file", folderId, fileName) : undefined;
+    if (env && cacheKey) {
+        const cached = await readLookupCache(env, cacheKey);
+        if (isCachedFile(cached, fileName)) return cached;
+    }
+
     const searchRes = await fetch(driveFilesUrl(`name='${driveLiteral(fileName)}' and '${driveLiteral(folderId)}' in parents and trashed=false`, `files(${DRIVE_FIELDS})`), {
         headers: { Authorization: `Bearer ${accessToken}` },
     });
     if (!searchRes.ok) throw new Error(`Drive file search failed: ${await searchRes.text()}`);
 
     const data: GoogleDriveSearchResponse = await searchRes.json();
-    return data.files && data.files.length > 0 ? data.files[0] : null;
+    const file = data.files && data.files.length > 0 ? data.files[0] : null;
+    if (file && env && cacheKey) await writeLookupCache(env, cacheKey, file, startedAt);
+    return file;
 }
 
-export async function streamDownloadFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env, range?: string, bucketFolderId?: string): Promise<DriveDownloadResult> {
+export async function streamDownloadFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env, range?: string, bucketFolderId?: string, useReadCache = true): Promise<DriveDownloadResult> {
     const pathStartedAt = performance.now();
-    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, bucketFolderId);
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, bucketFolderId, useReadCache);
     const pathDuration = performance.now() - pathStartedAt;
     if (!resolved) {
         throw new Error("File not found");
     }
     const { parentFolderId, fileName } = resolved;
     const fileStartedAt = performance.now();
-    const file = await findFileInFolder(accessToken, parentFolderId, fileName);
+    const file = await findFileInFolder(accessToken, parentFolderId, fileName, useReadCache ? env : undefined);
     const fileDuration = performance.now() - fileStartedAt;
 
     if (!file) {
@@ -326,13 +401,25 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
     }, 30000);
 
     const mediaStartedAt = performance.now();
-    const downloadRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
-        headers: { Authorization: `Bearer ${accessToken}`, ...(range ? { Range: range } : {}) },
-        signal: controller.signal,
-    });
+    let downloadRes: Response;
+    try {
+        downloadRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
+            headers: { Authorization: `Bearer ${accessToken}`, ...(range ? { Range: range } : {}) },
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
     const mediaDuration = performance.now() - mediaStartedAt;
 
-    clearTimeout(timeout);
+    if (downloadRes.status === 404) {
+        await downloadRes.body?.cancel();
+        if (useReadCache && env.ENABLE_READ_CACHE !== "false") {
+            await invalidateDriveObjectCache(env, bucket, parentFolderId, fileName);
+            return streamDownloadFromDrive(accessToken, bucket, objectKey, env, range, bucketFolderId, false);
+        }
+        throw new Error("File not found");
+    }
 
     if (!downloadRes.ok) {
         console.error(downloadRes.status);
@@ -356,7 +443,7 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
 }
 
 export async function deleteFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<void> {
-    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env);
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, undefined, false);
     if (!resolved) {
         throw new Error("File not found");
     }
@@ -375,6 +462,7 @@ export async function deleteFromDrive(accessToken: string, bucket: string, objec
     if (!deleteRes.ok) {
         throw new Error("Delete failed");
     }
+    await invalidateDriveObjectCache(env, bucket, parentFolderId, fileName);
 }
 
 export async function getFileMetadata(accessToken: string, bucket: string, objectKey: string, env: Env, bucketFolderId?: string): Promise<DriveFileMetadata> {
@@ -386,7 +474,7 @@ export async function getFileMetadata(accessToken: string, bucket: string, objec
     }
     const { parentFolderId, fileName } = resolved;
     const fileStartedAt = performance.now();
-    const file = await findFileInFolder(accessToken, parentFolderId, fileName);
+    const file = await findFileInFolder(accessToken, parentFolderId, fileName, env);
     const fileDuration = performance.now() - fileStartedAt;
 
     if (!file) {

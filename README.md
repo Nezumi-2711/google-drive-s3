@@ -80,6 +80,7 @@ https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboa
 | `CORS_ALLOWED_ORIGINS` | *(Optional)* Comma-separated exact browser origins, or `*`. Unset emits no CORS headers. |
 | `ENABLE_DOCS` | *(Optional)* Set to `false` to disable `/docs` and `/openapi.yaml`; enabled by default. |
 | `ENABLE_TIMING_LOGS` | *(Optional)* Set to `true` to log request duration, route shape, and status for S3/REST requests. Disabled by default. |
+| `ENABLE_READ_CACHE` | *(Optional)* Set to `false` to disable the 5-minute folder/object lookup cache. Enabled by default. |
 
 ### 4. Enable Multipart Uploads
 
@@ -141,4 +142,4 @@ For slow Gitea Actions logs, enable timing temporarily and open the same complet
 
 Compare p50/p95 separately by operation and status, including cold and repeated requests. Timing records use fixed labels and do not include bucket names, object keys, signed URLs, tickets, query strings, or response bodies. Existing error logs are unchanged. Auth, documentation, and OPTIONS routes do not emit these timing records.
 
-Reads reuse the bucket folder ID from the existing registry, removing one redundant Drive lookup without introducing a new cache. The existing registry TTL still applies, including when folders are changed directly in Drive. Listing and downloads still read live Drive data; nested folders still require lookup. For file browsers, prefer a narrow `prefix` and `delimiter=/` instead of recursively listing an entire bucket. Pagination parameters remain unsupported as described in [limitations](./docs/limitations.md).
+Reads reuse the bucket folder ID from the existing registry, and cache nested folder IDs plus object metadata in `FOLDER_CACHE` for 5 minutes. Cache keys are scoped by parent folder or bucket/object key. PUT, DELETE, and multipart completion invalidate the affected object metadata; folder operations invalidate their folder entry. Direct changes in Google Drive may therefore remain stale for at most the cache TTL. Listing still reads live child entries, and downloads still read live media bytes. For file browsers, prefer a narrow `prefix` and `delimiter=/` instead of recursively listing an entire bucket. Pagination parameters remain unsupported as described in [limitations](./docs/limitations.md).

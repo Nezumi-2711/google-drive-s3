@@ -233,6 +233,7 @@ describe("Dashboard status API routes (/api/*)", () => {
     it("returns bucket statistics on /api/buckets", async () => {
         await (ENV.AUTH_KV as KVNamespace).delete("drive-about");
         await (ENV.FOLDER_CACHE as KVNamespace).delete("bucket-registry");
+        for (const { name } of (await (ENV.FOLDER_CACHE as KVNamespace).list({ prefix: "drive-lookup:" })).keys) await (ENV.FOLDER_CACHE as KVNamespace).delete(name);
         const token = await getValidToken();
 
         const fakeFetch = vi.fn(async (input: RequestInfo | URL) => {

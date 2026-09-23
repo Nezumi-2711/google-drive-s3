@@ -69,14 +69,15 @@ export class FakeDrive {
         const hasNameFilter = /name='/.test(q);
         const name = /name='((?:\\.|[^'])*)'/.exec(q)?.[1]?.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
         const parent = /'([^']+)' in parents/.exec(q)?.[1] ?? "root";
+        const excludeTrashed = q.includes("trashed=false");
 
         if (q.includes(FOLDER_MIME)) {
-            const match = [...this.folders.values()].find((folder) => (!hasNameFilter || folder.name === name) && folder.parent === parent);
+            const match = [...this.folders.values()].find((folder) => (!hasNameFilter || folder.name === name) && folder.parent === parent && (!excludeTrashed || !folder.trashed));
             return Response.json({ files: match ? [{ id: match.id, name: match.name, mimeType: FOLDER_MIME }] : [] });
         }
 
-        const files = [...this.files.values()].filter((file) => (!hasNameFilter || file.name === name) && file.parent === parent);
-        const folders = [...this.folders.values()].filter((folder) => (!hasNameFilter || folder.name === name) && folder.parent === parent);
+        const files = [...this.files.values()].filter((file) => (!hasNameFilter || file.name === name) && file.parent === parent && (!excludeTrashed || !file.trashed));
+        const folders = [...this.folders.values()].filter((folder) => (!hasNameFilter || folder.name === name) && folder.parent === parent && (!excludeTrashed || !folder.trashed));
         return Response.json({
             files: [...files.map((file) => ({ ...file, size: String(file.data.byteLength), data: undefined })), ...folders.map((folder) => ({ id: folder.id, name: folder.name, mimeType: FOLDER_MIME }))],
         });

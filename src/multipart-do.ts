@@ -1,5 +1,5 @@
 import { alignedSendLen, cancelSession, createEmptyFile, putFinalChunk, queryStatus } from "./drive-resumable";
-import { getAccessToken } from "./google-drive";
+import { getAccessToken, invalidateDriveObjectCache } from "./google-drive";
 import type { DriveUploadResult, Env } from "./types";
 
 import { DurableObject } from "cloudflare:workers";
@@ -246,6 +246,7 @@ export class MultipartUploadDO extends DurableObject<Env> {
                 metadata = await putFinalChunk(this.requiredValue<string>("uploadUrl"), accessToken, driveOffset, total, carry);
             }
             const partEtags = stored.map((part) => part.etag);
+            await invalidateDriveObjectCache(this.env, this.requiredValue<string>("bucket"), this.requiredValue<string>("parentFolderId"), this.requiredValue<string>("fileName"));
             await this.ctx.storage.deleteAlarm();
             await this.ctx.storage.deleteAll();
             return { kind: "complete", metadata, partEtags };

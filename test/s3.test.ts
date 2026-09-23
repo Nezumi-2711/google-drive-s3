@@ -55,6 +55,132 @@ beforeEach(async () => {
 });
 
 describe("S3 compatibility", () => {
+    it("warms a deep path on HEAD and uses only media calls for subsequent ranges", async () => {
+        const path = "/test-bucket/actions_log/owner/repo/03/job.log.zst";
+        const uploaded = await worker.fetch(await signed(path, { method: "PUT", body: "0123456789" }), ENV, CTX);
+        expect(uploaded.status).toBe(200);
+        for (const { name } of (await ENV.FOLDER_CACHE.list({ prefix: "drive-lookup:" })).keys) await ENV.FOLDER_CACHE.delete(name);
+        vi.mocked(fetch).mockClear();
+
+        const firstHead = await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        expect(firstHead.status).toBe(200);
+        expect(firstHead.headers.get("Content-Length")).toBe("10");
+        expect(fetch).toHaveBeenCalledTimes(5);
+        vi.mocked(fetch).mockClear();
+        const secondHead = await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        expect(secondHead.status).toBe(200);
+        expect(secondHead.headers.get("ETag")).toBe(firstHead.headers.get("ETag"));
+        expect(fetch).not.toHaveBeenCalled();
+
+        for (const [range, expected] of [
+            ["bytes=8-", "89"],
+            ["bytes=6-", "6789"],
+            ["bytes=0-5", "012345"],
+        ]) {
+            vi.mocked(fetch).mockClear();
+            const response = await worker.fetch(await signed(path, { method: "GET", headers: { Range: range } }), ENV, CTX);
+            expect(response.status).toBe(206);
+            expect(response.headers.get("Content-Length")).toBe(String(expected.length));
+            expect(await response.text()).toBe(expected);
+            expect(fetch).toHaveBeenCalledTimes(1);
+            const input = vi.mocked(fetch).mock.calls[0][0];
+            expect(new URL(input instanceof Request ? input.url : String(input)).searchParams.get("alt")).toBe("media");
+        }
+    });
+
+    it("invalidates warm metadata and stats on S3 overwrite, delete and recreate", async () => {
+        const path = "/test-bucket/nested/mutable.txt";
+        expect((await worker.fetch(await signed(path, { method: "PUT", body: "old" }), ENV, CTX)).status).toBe(200);
+        const oldHead = await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        expect(oldHead.headers.get("Content-Length")).toBe("3");
+        await ENV.FOLDER_CACHE.put("bucket-stats:test-bucket", "stale");
+
+        const put = await worker.fetch(await signed(path, { method: "PUT", body: "new contents", headers: { "Content-Type": "text/plain" } }), ENV, CTX);
+        expect(put.status).toBe(200);
+        expect(await ENV.FOLDER_CACHE.get("bucket-stats:test-bucket")).toBeNull();
+        const updatedHead = await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        expect(updatedHead.headers.get("Content-Length")).toBe("12");
+        expect(updatedHead.headers.get("Content-Type")).toBe("text/plain");
+        expect(updatedHead.headers.get("ETag")).toBe(put.headers.get("ETag"));
+        expect(updatedHead.headers.get("ETag")).not.toBe(oldHead.headers.get("ETag"));
+        const ranged = await worker.fetch(await signed(path, { method: "GET", headers: { Range: "bytes=4-" } }), ENV, CTX);
+        expect(await ranged.text()).toBe("contents");
+
+        expect((await worker.fetch(await signed(path, { method: "DELETE" }), ENV, CTX)).status).toBe(204);
+        expect((await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX)).status).toBe(404);
+        const missing = await worker.fetch(await signed(path, { method: "GET" }), ENV, CTX);
+        expect(missing.status).toBe(404);
+        await missing.text();
+        expect((await worker.fetch(await signed(path, { method: "PUT", body: "reborn" }), ENV, CTX)).status).toBe(200);
+        const recreated = await worker.fetch(await signed(path, { method: "GET" }), ENV, CTX);
+        expect(recreated.status).toBe(200);
+        expect(await recreated.text()).toBe("reborn");
+    });
+
+    it("bypasses warm read caches when disabled and authenticates cached objects", async () => {
+        const path = "/test-bucket/nested/private.txt";
+        await worker.fetch(await signed(path, { method: "PUT", body: "secret" }), ENV, CTX);
+        await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        vi.mocked(fetch).mockClear();
+        const denied = await worker.fetch(new Request(`${ENDPOINT}${path}`), ENV, CTX);
+        expect(denied.status).toBe(403);
+        await denied.text();
+        expect(fetch).not.toHaveBeenCalled();
+
+        const response = await worker.fetch(await signed(path, { method: "GET" }), { ...ENV, ENABLE_READ_CACHE: "false" }, CTX);
+        expect(response.status).toBe(200);
+        expect(await response.text()).toBe("secret");
+        expect(fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it.each(["corrupt", "expired", "invalid"])("refetches %s lookup cache entries", async (mode) => {
+        const path = "/test-bucket/nested/fresh.txt";
+        await worker.fetch(await signed(path, { method: "PUT", body: "fresh" }), ENV, CTX);
+        await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        for (const { name } of (await ENV.FOLDER_CACHE.list({ prefix: "drive-lookup:" })).keys) {
+            const value = mode === "corrupt" ? "{" : JSON.stringify({ expiresAt: Date.now() + (mode === "expired" ? -1 : 60_000), value: { id: 123 } });
+            await ENV.FOLDER_CACHE.put(name, value);
+        }
+        vi.mocked(fetch).mockClear();
+        const response = await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        expect(response.status).toBe(200);
+        expect(response.headers.get("Content-Length")).toBe("5");
+        expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("re-resolves an externally replaced file once when cached media returns 404", async () => {
+        const path = "/test-bucket/file.txt";
+        await worker.fetch(await signed(path, { method: "PUT", body: "old" }), ENV, CTX);
+        await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+        const stored = [...drive.files.values()].find((file) => file.name === "file.txt");
+        if (!stored) throw new Error("Uploaded file missing");
+        drive.files.delete(stored.id);
+        const data = new TextEncoder().encode("replacement");
+        drive.files.set("external-replacement", { ...stored, id: "external-replacement", data, md5Checksum: fakeMd5(data) });
+        vi.mocked(fetch).mockClear();
+
+        const response = await worker.fetch(await signed(path, { method: "GET", headers: { Range: "bytes=0-2" } }), ENV, CTX);
+        expect(response.status).toBe(206);
+        expect(await response.text()).toBe("rep");
+        expect(fetch).toHaveBeenCalledTimes(3);
+    });
+
+    it("keeps cached metadata scoped to parent folder IDs", async () => {
+        for (const [folder, value] of [
+            ["first", "one"],
+            ["second", "different"],
+        ]) {
+            const path = `/test-bucket/${folder}/same.txt`;
+            await worker.fetch(await signed(path, { method: "PUT", body: value }), ENV, CTX);
+            const head = await worker.fetch(await signed(path, { method: "HEAD" }), ENV, CTX);
+            expect(head.headers.get("Content-Length")).toBe(String(value.length));
+        }
+        vi.mocked(fetch).mockClear();
+        const response = await worker.fetch(await signed("/test-bucket/first/same.txt", { method: "HEAD" }), ENV, CTX);
+        expect(response.headers.get("Content-Length")).toBe("3");
+        expect(fetch).not.toHaveBeenCalled();
+    });
+
     it.each([
         { code: "NoSuchUpload", status: 404 },
         { code: "InvalidPart", status: 400 },
@@ -139,8 +265,8 @@ describe("S3 compatibility", () => {
         { method: "GET", path: "/test-bucket/read.txt", calls: 2, expected: "payload" },
         { method: "HEAD", path: "/test-bucket/read.txt", calls: 1, expected: "" },
         { method: "GET", path: "/test-bucket?delimiter=/", calls: 1, expected: "<Key>read.txt</Key>" },
-        { method: "GET", path: "/test-bucket/nested/read.txt", calls: 3, expected: "nested payload" },
-        { method: "HEAD", path: "/test-bucket/nested/read.txt", calls: 2, expected: "" },
+        { method: "GET", path: "/test-bucket/nested/read.txt", calls: 2, expected: "nested payload" },
+        { method: "HEAD", path: "/test-bucket/nested/read.txt", calls: 1, expected: "" },
         { method: "GET", path: "/test-bucket?prefix=nested/&delimiter=/", calls: 2, expected: "<Key>nested/read.txt</Key>" },
         { method: "GET", path: "/test-bucket", calls: 2, expected: "<Key>nested/read.txt</Key>" },
     ])("reuses the registered bucket folder for $method $path", async ({ method, path, calls, expected }) => {

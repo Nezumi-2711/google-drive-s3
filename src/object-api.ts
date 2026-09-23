@@ -1,13 +1,13 @@
 import { jsonResponse } from "./auth-api";
 import { findBucketRecord } from "./bucket-registry";
-import { deleteFromDrive, findFolderId, getAccessToken, getFileMetadata, listObjects, resolvePathToExistingFolderAndFile, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive, updateDriveFile } from "./google-drive";
+import { deleteFromDrive, findFolderId, getAccessToken, getFileMetadata, invalidateDriveFolderCache, listObjects, resolvePathToExistingFolderAndFile, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive, updateDriveFile } from "./google-drive";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, etag, listMultipartParts, parsePositiveInt, uploadPartCore } from "./multipart-core";
 import type { Env } from "./types";
 
 export async function invalidateObjectCaches(env: Env, bucket: string, parentId?: string, name?: string): Promise<void> {
     await env.FOLDER_CACHE.delete(`bucket-stats:${bucket}`);
     if (parentId && name) {
-        await env.FOLDER_CACHE.delete(`${parentId}/${name}`);
+        await invalidateDriveFolderCache(env, parentId, name);
     }
 }
 
@@ -273,7 +273,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
             try {
                 const accessToken = await getAccessToken(env);
                 // Check if folder already exists
-                const existingResolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, `${prefix}dummy`, env);
+                const existingResolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, `${prefix}dummy`, env, undefined, false);
                 if (existingResolved) {
                     return jsonResponse({ message: "Folder already exists" }, 409);
                 }

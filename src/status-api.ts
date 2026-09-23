@@ -234,14 +234,8 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
         console.error("Failed to acquire bucket registry", err);
     }
 
-    let accessToken: string | null = null;
-    try {
-        accessToken = await getAccessToken(env);
-    } catch (err) {
-        console.error("Failed to acquire access token for bucket stats", err);
-    }
-
     const bucketStats: BucketStatItem[] = [];
+    const uncachedRecords: typeof records = [];
 
     for (const record of records) {
         const bucket = record.name;
@@ -257,7 +251,21 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
                 }
             }
         }
+        uncachedRecords.push(record);
+    }
 
+    let accessToken: string | null = null;
+    if (uncachedRecords.length > 0) {
+        try {
+            accessToken = await getAccessToken(env);
+        } catch (err) {
+            console.error("Failed to acquire access token for bucket stats", err);
+        }
+    }
+
+    for (const record of uncachedRecords) {
+        const bucket = record.name;
+        const cacheKey = `bucket-stats:${bucket}`;
         if (!accessToken) {
             bucketStats.push({
                 name: bucket,

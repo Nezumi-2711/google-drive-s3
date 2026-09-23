@@ -15,6 +15,7 @@ export interface Env {
     CORS_ALLOWED_ORIGINS?: string;
     ENABLE_DOCS?: string;
     ENABLE_TIMING_LOGS?: string;
+    ENABLE_READ_CACHE?: string;
 }
 
 export interface GoogleDriveFile {
