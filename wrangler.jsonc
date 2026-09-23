@@ -12,8 +12,10 @@
         "ALLOW_MULTIPART": "true",
         "ETAG_STYLE": "md5",
         "CORS_ALLOWED_ORIGINS": "https://s3-drive-storage-manage.nezumi.workers.dev,http://localhost:5173",
-        "ENABLE_DOCS": "true"
+        "ENABLE_DOCS": "true",
+        "ENABLE_TIMING_LOGS": "true"
     },
+    "keep_vars": true,
     "rules": [
         {
             "type": "Text",
