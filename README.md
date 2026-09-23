@@ -79,6 +79,7 @@ https://developers.cloudflare.com/workers/configuration/secrets/#via-the-dashboa
 | `DRIVE_ROOT_FOLDER` | Root folder name in Google Drive where all buckets reside (e.g. `s3-storage`). Set in `wrangler.jsonc` vars or as a secret. |
 | `CORS_ALLOWED_ORIGINS` | *(Optional)* Comma-separated exact browser origins, or `*`. Unset emits no CORS headers. |
 | `ENABLE_DOCS` | *(Optional)* Set to `false` to disable `/docs` and `/openapi.yaml`; enabled by default. |
+| `ENABLE_TIMING_LOGS` | *(Optional)* Set to `true` to log request duration, route shape, and status for S3/REST requests. Disabled by default. |
 
 ### 4. Enable Multipart Uploads
 
@@ -109,3 +110,18 @@ CORS_ALLOWED_ORIGINS=https://app.example.com,http://localhost:5173
 Use `*` only for a public, credential-free integration. Leave the value unset to emit no CORS headers, preserving CLI-only behavior. Allowed origins receive preflight support for S3 methods and the browser-readable response headers `ETag`, `Content-Range`, `Content-Length`, `Last-Modified`, `Accept-Ranges`, and `x-amz-request-id`. Server-to-server clients do not need CORS: requests without an `Origin` retain their normal S3 response and receive no `Access-Control-*` headers. Exact origin allow-lists add the harmless `Vary: Origin` response header for cache correctness.
 
 For browser uploads, keep `SECRET_KEY` in a BFF and give the browser short-lived presigned URLs. See the [frontend integration guide](./docs/integration-guide.md).
+
+## Diagnosing Slow Reads
+
+Temporarily set the Worker variable `ENABLE_TIMING_LOGS` to the string `true` and inspect Worker logs while reproducing listing and downloads. It is disabled when unset or set to `false`. Turn it off after collecting a representative sample.
+
+Timing entries contain `method`, `status`, and `durationMs`, plus these grouping fields:
+
+- `type=s3-timing`: `GET` with `hasKey=false` normally means listing; `GET` with `hasKey=true` means content download; `HEAD` with `hasKey=true` means metadata. Multipart queries also use these shapes, so exclude multipart traffic when comparing normal reads.
+- `type=api-timing`: `route=objects` means listing for GET requests, `objects/content` means download, and `objects/metadata` means metadata. `buckets` and `status` identify dashboard reads; other API routes are grouped as `other`.
+
+`durationMs` measures wall-clock time from Worker entry until the response is ready, including authentication, KV access, and upstream work. For streamed downloads it stops after Drive response headers arrive: it does not buffer or consume the body, measure completed transfer time, or include the client-to-Worker network latency. Compare client-side time to first byte and total download time separately. This first measurement identifies the slow workflow, not the individual upstream call responsible.
+
+Compare p50/p95 separately by operation and status, including cold and repeated requests. Timing records use fixed labels and do not include bucket names, object keys, signed URLs, tickets, query strings, or response bodies. Existing error logs are unchanged. Auth, documentation, and OPTIONS routes do not emit these timing records.
+
+Reads reuse the bucket folder ID from the existing registry, removing one redundant Drive lookup without introducing a new cache. The existing registry TTL still applies, including when folders are changed directly in Drive. Listing and downloads still read live Drive data; nested folders still require lookup. For file browsers, prefer a narrow `prefix` and `delimiter=/` instead of recursively listing an entire bucket. Pagination parameters remain unsupported as described in [limitations](./docs/limitations.md).

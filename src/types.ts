@@ -14,6 +14,7 @@ export interface Env {
     ETAG_STYLE?: "md5" | "multipart";
     CORS_ALLOWED_ORIGINS?: string;
     ENABLE_DOCS?: string;
+    ENABLE_TIMING_LOGS?: string;
 }
 
 export interface GoogleDriveFile {
@@ -29,6 +30,20 @@ export interface GoogleDriveFile {
 
 export interface GoogleDriveSearchResponse {
     files?: GoogleDriveFile[];
+    nextPageToken?: string;
+}
+
+export interface MultipartPart {
+    partNumber: number;
+    size: number;
+    etag: string;
+    ts: number;
+}
+
+export interface MultipartPartsList {
+    parts: MultipartPart[];
+    nextMarker: number;
+    truncated: boolean;
 }
 
 export interface DriveUploadResult {

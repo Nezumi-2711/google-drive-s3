@@ -3,8 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { decodedBodyChunks } from "../src/aws-chunked";
 import worker from "../src/index";
+import { completeMultipartUpload, encodeUploadId, uploadPartCore } from "../src/multipart-core";
 import type { Env } from "../src/types";
-import { bytes, FAKE_MODIFIED_TIME, fakeMd5, FakeDrive } from "./fake-drive";
+import { bytes, FAKE_MODIFIED_TIME, FakeDrive, fakeMd5 } from "./fake-drive";
 
 import { env } from "cloudflare:test";
 
@@ -54,6 +55,99 @@ beforeEach(async () => {
 });
 
 describe("S3 compatibility", () => {
+    it.each([
+        { code: "NoSuchUpload", status: 404 },
+        { code: "InvalidPart", status: 400 },
+        { code: "InternalError", status: 500 },
+    ])("maps multipart part error $code to HTTP $status", async ({ code, status }) => {
+        const beginPart = vi.fn().mockResolvedValue({ kind: "error", code, message: "Part admission failed" });
+        const testEnv = { ...ENV, MPU: { getByName: () => ({ beginPart }) } as unknown as Env["MPU"] };
+        const uploadId = encodeUploadId("test-bucket", "file.bin");
+        const request = new Request(`${ENDPOINT}/test-bucket/file.bin`, { method: "PUT", headers: { "Content-Length": "1" }, body: "x" });
+
+        const result = await uploadPartCore(request, testEnv, "token", "test-bucket", "file.bin", uploadId, 1);
+
+        expect(beginPart).toHaveBeenCalledWith(expect.any(String), 1, 1);
+        expect(result).toEqual({ kind: "error", code, status, message: "Part admission failed" });
+    });
+
+    it.each([
+        { code: "NoSuchUpload", status: 404 },
+        { code: "InvalidPart", status: 400 },
+        { code: "InvalidPartOrder", status: 400 },
+        { code: "InternalError", status: 500 },
+    ])("maps multipart completion error $code to HTTP $status", async ({ code, status }) => {
+        const complete = vi.fn().mockResolvedValue({ kind: "error", code, message: "Completion failed" });
+        const testEnv = { ...ENV, MPU: { getByName: () => ({ complete }) } as unknown as Env["MPU"] };
+        const uploadId = encodeUploadId("test-bucket", "file.bin");
+        const parts = [{ partNumber: 1, etag: "part-etag" }];
+
+        const result = await completeMultipartUpload(testEnv, "test-bucket", "file.bin", uploadId, parts, 1);
+
+        expect(complete).toHaveBeenCalledWith(parts, 1);
+        expect(result).toEqual({ kind: "error", code, status, message: "Completion failed" });
+    });
+
+    it.each([undefined, "false"])("keeps timing logs disabled with ENABLE_TIMING_LOGS=%s", async (flag) => {
+        const info = vi.spyOn(console, "info").mockImplementation(() => {});
+        try {
+            const response = await worker.fetch(await signed("/test-bucket?delimiter=/", { method: "GET" }), { ...ENV, ENABLE_TIMING_LOGS: flag }, CTX);
+            expect(response.status).toBe(200);
+            await response.text();
+            expect(info).not.toHaveBeenCalled();
+        } finally {
+            info.mockRestore();
+        }
+    });
+
+    it.each([
+        { path: "/test-bucket?delimiter=/", method: "GET", hasKey: false, status: 200 },
+        { path: "/test-bucket/private.txt", method: "GET", hasKey: true, status: 200 },
+        { path: "/test-bucket/private.txt", method: "HEAD", hasKey: true, status: 200 },
+        { path: "/test-bucket/missing.txt", method: "GET", hasKey: true, status: 404 },
+        { path: "/missing-bucket/private.txt", method: "GET", hasKey: true, status: 403 },
+    ])("logs opt-in S3 timing without signed URL data for $method $path", async ({ path, method, hasKey, status }) => {
+        await worker.fetch(await signed("/test-bucket/private.txt", { method: "PUT", body: "private content" }), ENV, CTX);
+        const info = vi.spyOn(console, "info").mockImplementation(() => {});
+        try {
+            const response = await worker.fetch(await presigned(path, { method }), { ...ENV, ENABLE_TIMING_LOGS: "true" }, CTX);
+            expect(response.status).toBe(status);
+            expect(info).toHaveBeenCalledTimes(1);
+            const entry = JSON.parse(String(info.mock.calls[0][0]));
+            expect(entry).toEqual({ type: "s3-timing", method, hasKey, status, durationMs: expect.any(Number) });
+            expect(entry.durationMs).toBeGreaterThanOrEqual(0);
+            if (method === "GET" && path.endsWith("/private.txt") && status === 200) {
+                expect(await response.text()).toBe("private content");
+            } else {
+                await response.text();
+            }
+        } finally {
+            info.mockRestore();
+        }
+    });
+
+    it.each([
+        { method: "GET", path: "/test-bucket/read.txt", calls: 2, expected: "payload" },
+        { method: "HEAD", path: "/test-bucket/read.txt", calls: 1, expected: "" },
+        { method: "GET", path: "/test-bucket?delimiter=/", calls: 1, expected: "<Key>read.txt</Key>" },
+        { method: "GET", path: "/test-bucket/nested/read.txt", calls: 3, expected: "nested payload" },
+        { method: "HEAD", path: "/test-bucket/nested/read.txt", calls: 2, expected: "" },
+        { method: "GET", path: "/test-bucket?prefix=nested/&delimiter=/", calls: 2, expected: "<Key>nested/read.txt</Key>" },
+        { method: "GET", path: "/test-bucket", calls: 2, expected: "<Key>nested/read.txt</Key>" },
+    ])("reuses the registered bucket folder for $method $path", async ({ method, path, calls, expected }) => {
+        await worker.fetch(await signed("/test-bucket/read.txt", { method: "PUT", body: "payload" }), ENV, CTX);
+        await worker.fetch(await signed("/test-bucket/nested/read.txt", { method: "PUT", body: "nested payload" }), ENV, CTX);
+        vi.mocked(fetch).mockClear();
+
+        const response = await worker.fetch(await signed(path, { method }), ENV, CTX);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain(expected);
+        expect(fetch).toHaveBeenCalledTimes(calls);
+        const queries = vi.mocked(fetch).mock.calls.map(([input]) => new URL(input instanceof Request ? input.url : String(input)).searchParams.get("q"));
+        expect(queries.some((query) => query?.includes("name='test-bucket'"))).toBe(false);
+    });
+
     it("returns an empty PutObject response and overwrites the same Drive file", async () => {
         const first = await worker.fetch(await signed("/test-bucket/file.txt", { method: "PUT", body: "first" }), ENV, CTX);
         expect(first.status).toBe(200);

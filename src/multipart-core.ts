@@ -71,13 +71,7 @@ export async function multipartObjectEtag(metadata: DriveUploadResult, partEtags
     return `${Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")}-${partEtags.length}`;
 }
 
-export async function createMultipartUpload(
-    env: Env,
-    accessToken: string,
-    bucket: string,
-    key: string,
-    mimeType: string,
-): Promise<{ uploadId: string; partSize: number } | CoreError> {
+export async function createMultipartUpload(env: Env, accessToken: string, bucket: string, key: string, mimeType: string): Promise<{ uploadId: string; partSize: number } | CoreError> {
     if (env.ALLOW_MULTIPART !== "true") return { kind: "error", code: "NotImplemented", status: 501 };
     const { parentFolderId, fileName } = await resolvePathToFolderAndFile(accessToken, bucket, key, env);
     const existing = await findFileInFolder(accessToken, parentFolderId, fileName);
@@ -88,15 +82,7 @@ export async function createMultipartUpload(
     return { uploadId, partSize: DEFAULT_PART_SIZE };
 }
 
-export async function uploadPartCore(
-    request: Request,
-    env: Env,
-    accessToken: string,
-    bucket: string,
-    key: string,
-    uploadId: string,
-    partNumber: number | undefined,
-): Promise<{ etag: string } | CoreError> {
+export async function uploadPartCore(request: Request, env: Env, accessToken: string, bucket: string, key: string, uploadId: string, partNumber: number | undefined): Promise<{ etag: string } | CoreError> {
     if (!uploadIdMatches(uploadId, bucket, key)) return { kind: "error", code: "NoSuchUpload", status: 404 };
     if (!partNumber || partNumber > 10_000) return { kind: "error", code: "InvalidArgument", status: 400, message: "partNumber must be between 1 and 10000" };
     if (request.headers.has("x-amz-copy-source")) return { kind: "error", code: "NotImplemented", status: 501 };
@@ -110,7 +96,11 @@ export async function uploadPartCore(
     const lease = await stub.beginPart(requestId, partNumber, length);
     request.signal.removeEventListener("abort", onAbort);
     if (lease.kind === "slowdown") return { kind: "error", code: "SlowDown", status: 503, retryAfter: "1" };
-    if (lease.kind === "error") return { kind: "error", code: lease.code, status: lease.code === "NoSuchUpload" ? 404 : 500, message: lease.message };
+    if (lease.kind === "error") {
+        if (lease.code === "NoSuchUpload") return { kind: "error", code: lease.code, status: 404, message: lease.message };
+        if (lease.code === "InvalidPart") return { kind: "error", code: lease.code, status: 400, message: lease.message };
+        return { kind: "error", code: lease.code, status: 500, message: lease.message };
+    }
     if (lease.kind === "committed") {
         await drainBody(request.body);
         return { etag: lease.etag };
@@ -150,17 +140,14 @@ export async function uploadPartCore(
     }
 }
 
-export async function completeMultipartUpload(
-    env: Env,
-    bucket: string,
-    key: string,
-    uploadId: string,
-    parts: Array<{ partNumber: number; etag: string }>,
-    expectedTotal?: number,
-): Promise<{ etag: string; key: string } | CoreError> {
+export async function completeMultipartUpload(env: Env, bucket: string, key: string, uploadId: string, parts: Array<{ partNumber: number; etag: string }>, expectedTotal?: number): Promise<{ etag: string; key: string } | CoreError> {
     if (!uploadIdMatches(uploadId, bucket, key)) return { kind: "error", code: "NoSuchUpload", status: 404 };
     const result = await multipartStub(env, uploadId).complete(parts, expectedTotal);
-    if (result.kind === "error") return { kind: "error", code: result.code, status: result.code === "NoSuchUpload" ? 404 : 400, message: result.message };
+    if (result.kind === "error") {
+        if (result.code === "NoSuchUpload") return { kind: "error", code: result.code, status: 404, message: result.message };
+        if (result.code === "InternalError") return { kind: "error", code: result.code, status: 500, message: result.message };
+        return { kind: "error", code: result.code, status: 400, message: result.message };
+    }
     const value = await multipartObjectEtag(result.metadata, result.partEtags, env.ETAG_STYLE);
     return { etag: value, key };
 }
@@ -172,14 +159,7 @@ export async function abortMultipartUpload(env: Env, bucket: string, key: string
     return true;
 }
 
-export async function listMultipartParts(
-    env: Env,
-    bucket: string,
-    key: string,
-    uploadId: string,
-    marker = 0,
-    maxParts = 1000,
-): Promise<import("./types").MultipartPartsList | CoreError> {
+export async function listMultipartParts(env: Env, bucket: string, key: string, uploadId: string, marker = 0, maxParts = 1000): Promise<import("./types").MultipartPartsList | CoreError> {
     if (!uploadIdMatches(uploadId, bucket, key)) return { kind: "error", code: "NoSuchUpload", status: 404 };
     if (marker < 0 || maxParts < 0 || maxParts > 1000) return { kind: "error", code: "InvalidArgument", status: 400 };
     const result = await multipartStub(env, uploadId).listParts(marker, maxParts);

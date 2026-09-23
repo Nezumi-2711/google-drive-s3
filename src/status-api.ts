@@ -227,7 +227,7 @@ async function handleStatus(env: Env): Promise<Response> {
 }
 
 async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response> {
-    let records: { name: string; publicRead: boolean }[] = [];
+    let records: { name: string; folderId: string; publicRead: boolean }[] = [];
     try {
         records = await getBucketRegistry(env);
     } catch (err) {
@@ -272,7 +272,7 @@ async function handleBuckets(env: Env, forceRefresh: boolean): Promise<Response>
         }
 
         try {
-            const { contents, truncated } = await listObjects(accessToken, bucket, "", env);
+            const { contents, truncated } = await listObjects(accessToken, bucket, "", env, undefined, record.folderId);
             let totalSize = 0;
             let latestModified: number | null = null;
 

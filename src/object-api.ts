@@ -1,28 +1,7 @@
 import { jsonResponse } from "./auth-api";
 import { findBucketRecord } from "./bucket-registry";
-import {
-    deleteFromDrive,
-    findFileInFolder,
-    findFolderId,
-    getAccessToken,
-    getFileMetadata,
-    getOrCreateFolder,
-    listObjects,
-    resolvePathToExistingFolderAndFile,
-    resolvePathToFolderAndFile,
-    streamDownloadFromDrive,
-    streamUploadToDrive,
-    updateDriveFile,
-} from "./google-drive";
-import {
-    abortMultipartUpload,
-    completeMultipartUpload,
-    createMultipartUpload,
-    etag,
-    listMultipartParts,
-    parsePositiveInt,
-    uploadPartCore,
-} from "./multipart-core";
+import { deleteFromDrive, findFolderId, getAccessToken, getFileMetadata, listObjects, resolvePathToExistingFolderAndFile, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive, updateDriveFile } from "./google-drive";
+import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, etag, listMultipartParts, parsePositiveInt, uploadPartCore } from "./multipart-core";
 import type { Env } from "./types";
 
 export async function invalidateObjectCaches(env: Env, bucket: string, parentId?: string, name?: string): Promise<void> {
@@ -76,7 +55,7 @@ export async function handleTicketDownload(request: Request, env: Env): Promise<
     try {
         const accessToken = await getAccessToken(env);
         const range = request.headers.get("Range") ?? undefined;
-        const result = await streamDownloadFromDrive(accessToken, bucket, key, env, range);
+        const result = await streamDownloadFromDrive(accessToken, bucket, key, env, range, bucketRecord.folderId);
 
         const filename = key.split("/").filter(Boolean).pop() || "download";
         const headers = new Headers({
@@ -121,7 +100,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
             const delimiter = url.searchParams.get("delimiter") ?? undefined;
             try {
                 const accessToken = await getAccessToken(env);
-                const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, env, delimiter);
+                const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, env, delimiter, bucketRecord.folderId);
                 return jsonResponse(
                     {
                         bucket,
@@ -186,7 +165,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
 
         try {
             const accessToken = await getAccessToken(env);
-            const meta = await getFileMetadata(accessToken, bucket, key, env);
+            const meta = await getFileMetadata(accessToken, bucket, key, env, bucketRecord.folderId);
             const name = key.split("/").pop() || key;
             return jsonResponse(
                 {
@@ -221,7 +200,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
             try {
                 const accessToken = await getAccessToken(env);
                 const range = request.headers.get("Range") ?? undefined;
-                const result = await streamDownloadFromDrive(accessToken, bucket, key, env, range);
+                const result = await streamDownloadFromDrive(accessToken, bucket, key, env, range, bucketRecord.folderId);
 
                 const filename = key.split("/").filter(Boolean).pop() || "download";
                 const headers = new Headers({
@@ -298,7 +277,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
                 }
 
                 // Create folder hierarchy
-                const resolved = await resolvePathToFolderAndFile(accessToken, bucket, `${prefix}dummy`, env);
+                await resolvePathToFolderAndFile(accessToken, bucket, `${prefix}dummy`, env);
                 await invalidateObjectCaches(env, bucket);
                 return jsonResponse({ prefix }, 201);
             } catch (err: unknown) {

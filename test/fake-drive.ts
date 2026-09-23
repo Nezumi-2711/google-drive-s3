@@ -105,15 +105,15 @@ export class FakeDrive {
         return Response.json({ ...file, size: "0", data: undefined });
     }
 
-    private patchFile(fileId: string, body: Record<string, unknown>, url: URL): Response {
-        if (this.folders.has(fileId)) {
-            const folder = this.folders.get(fileId)!;
+    private patchFile(fileId: string, body: Record<string, unknown>, _url: URL): Response {
+        const folder = this.folders.get(fileId);
+        if (folder) {
             if (body.trashed !== undefined) folder.trashed = Boolean(body.trashed);
             if (body.name !== undefined) folder.name = String(body.name);
             return Response.json({ id: folder.id, name: folder.name, mimeType: FOLDER_MIME, trashed: folder.trashed });
         }
-        if (this.files.has(fileId)) {
-            const file = this.files.get(fileId)!;
+        const file = this.files.get(fileId);
+        if (file) {
             if (body.trashed !== undefined) file.trashed = Boolean(body.trashed);
             if (body.name !== undefined) file.name = String(body.name);
             return Response.json({ id: file.id, name: file.name, mimeType: file.mimeType, size: String(file.data.byteLength), trashed: file.trashed });

@@ -1,17 +1,8 @@
-import {
-    MAX_COMPLETE_XML,
-    abortMultipartUpload,
-    completeMultipartUpload,
-    createMultipartUpload,
-    etag,
-    listMultipartParts,
-    parsePositiveInt,
-    uploadPartCore,
-} from "./multipart-core";
 import { deleteFromDrive, getFileMetadata, listObjects, streamDownloadFromDrive, streamUploadToDrive } from "./google-drive";
+import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, etag, listMultipartParts, MAX_COMPLETE_XML, parsePositiveInt, uploadPartCore } from "./multipart-core";
 import { S3Exception, s3Error } from "./s3-errors";
 import { completeMultipartUploadResult, generateListBucketResult, initiateMultipartUploadResult, listMultipartUploadsResult, listPartsResult, parseCompleteMultipartUpload } from "./s3-xml";
-import type { Env } from "./types";
+import type { Env, MultipartPartsList } from "./types";
 
 function xmlResponse(body: string, status = 200): Response {
     return new Response(body, { status, headers: { "Content-Type": "application/xml", "Cache-Control": "no-transform" } });
@@ -75,7 +66,7 @@ async function listParts(env: Env, bucket: string, key: string, url: URL): Promi
     if ("kind" in result && result.kind === "error") {
         return s3Error(result.code, result.status, result.message, `/${bucket}/${key}`);
     }
-    return xmlResponse(listPartsResult(bucket, key, uploadId, result as import("./types").MultipartPartsList));
+    return xmlResponse(listPartsResult(bucket, key, uploadId, result as MultipartPartsList));
 }
 
 async function putObject(request: Request, env: Env, accessToken: string, bucket: string, key: string): Promise<Response> {
@@ -84,7 +75,7 @@ async function putObject(request: Request, env: Env, accessToken: string, bucket
     return new Response(null, { status: 200, headers: { ETag: `"${etag(result)}"` } });
 }
 
-export async function dispatch(request: Request, env: Env, accessToken: string, bucket: string, key: string): Promise<Response> {
+export async function dispatch(request: Request, env: Env, accessToken: string, bucket: string, key: string, bucketFolderId?: string): Promise<Response> {
     const url = new URL(request.url);
     const method = request.method;
     const resource = `/${bucket}${key ? `/${key}` : ""}`;
@@ -101,11 +92,11 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
         if (!key) {
             const prefix = url.searchParams.get("prefix") ?? "";
             const delimiter = url.searchParams.get("delimiter") ?? undefined;
-            const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, env, delimiter);
+            const { contents, commonPrefixes, truncated } = await listObjects(accessToken, bucket, prefix, env, delimiter, bucketFolderId);
             return xmlResponse(generateListBucketResult(bucket, prefix, delimiter, contents, commonPrefixes, truncated));
         }
         try {
-            const file = await streamDownloadFromDrive(accessToken, bucket, key, env, request.headers.get("Range") ?? undefined);
+            const file = await streamDownloadFromDrive(accessToken, bucket, key, env, request.headers.get("Range") ?? undefined, bucketFolderId);
             const headers = new Headers({
                 "Content-Type": file.contentType,
                 "Content-Length": file.contentLength ?? file.size.toString(),
@@ -125,7 +116,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
     if (method === "HEAD") {
         if (!key) return new Response(null, { status: 200 });
         try {
-            const metadata = await getFileMetadata(accessToken, bucket, key, env);
+            const metadata = await getFileMetadata(accessToken, bucket, key, env, bucketFolderId);
             const headers = new Headers({ "Content-Type": metadata.mimeType, "Content-Length": metadata.size.toString(), "Cache-Control": "no-transform", "Accept-Ranges": "bytes", ETag: `"${etag(metadata)}"` });
             if (metadata.modifiedTime) headers.set("Last-Modified", new Date(metadata.modifiedTime).toUTCString());
             return new Response(null, { status: 200, headers });

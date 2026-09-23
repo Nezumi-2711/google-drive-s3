@@ -39,6 +39,61 @@ beforeEach(async () => {
 });
 
 describe("Object API (/api/objects)", () => {
+    it.each([undefined, "false", "true"])("enables REST timing only with ENABLE_TIMING_LOGS=true (received %s)", async (flag) => {
+        const info = vi.spyOn(console, "info").mockImplementation(() => {});
+        try {
+            const response = await worker.fetch(new Request(`${ENDPOINT}/api/objects?bucket=test-bucket&delimiter=/`, { headers: { Authorization: `Bearer ${validToken}` } }), { ...ENV, ENABLE_TIMING_LOGS: flag }, CTX);
+            expect(response.status).toBe(200);
+            await response.text();
+            expect(info).toHaveBeenCalledTimes(flag === "true" ? 1 : 0);
+            if (flag === "true") {
+                const entry = JSON.parse(String(info.mock.calls[0][0]));
+                expect(entry).toEqual({ type: "api-timing", method: "GET", route: "objects", status: 200, durationMs: expect.any(Number) });
+                expect(entry.durationMs).toBeGreaterThanOrEqual(0);
+            }
+        } finally {
+            info.mockRestore();
+        }
+    });
+
+    it.each([
+        { path: "/api/objects/metadata?bucket=test-bucket&key=private.txt", route: "objects/metadata", status: 404 },
+        { path: "/api/objects/content?bucket=test-bucket&key=private.txt", route: "objects/content", status: 404 },
+        { path: "/api/objects/content?bucket=test-bucket&key=private.txt&ticket=secret-ticket", route: "objects/content", status: 403 },
+        { path: "/api/private-name/private-key?token=secret", route: "other", status: 404 },
+    ])("uses only fixed REST timing labels for $path", async ({ path, route, status }) => {
+        const info = vi.spyOn(console, "info").mockImplementation(() => {});
+        try {
+            const response = await worker.fetch(new Request(`${ENDPOINT}${path}`, { headers: { Authorization: `Bearer ${validToken}` } }), { ...ENV, ENABLE_TIMING_LOGS: "true" }, CTX);
+            expect(response.status).toBe(status);
+            await response.text();
+            expect(info).toHaveBeenCalledTimes(1);
+            expect(JSON.parse(String(info.mock.calls[0][0]))).toEqual({ type: "api-timing", method: "GET", route, status, durationMs: expect.any(Number) });
+        } finally {
+            info.mockRestore();
+        }
+    });
+
+    it.each([
+        { path: "?bucket=test-bucket&delimiter=/", calls: 1 },
+        { path: "/metadata?bucket=test-bucket&key=read.txt", calls: 1 },
+        { path: "/content?bucket=test-bucket&key=read.txt", calls: 2 },
+    ])("reuses the registered bucket folder for GET /api/objects$path", async ({ path, calls }) => {
+        const headers = { Authorization: `Bearer ${validToken}` };
+        const upload = await worker.fetch(new Request(`${ENDPOINT}/api/objects/content?bucket=test-bucket&key=read.txt`, { method: "PUT", headers, body: "payload" }), ENV, CTX);
+        expect(upload.status).toBe(200);
+        await upload.text();
+        vi.mocked(fetch).mockClear();
+
+        const response = await worker.fetch(new Request(`${ENDPOINT}/api/objects${path}`, { headers }), ENV, CTX);
+
+        expect(response.status).toBe(200);
+        expect(await response.text()).toContain(path.startsWith("/content") ? "payload" : "read.txt");
+        expect(fetch).toHaveBeenCalledTimes(calls);
+        const queries = vi.mocked(fetch).mock.calls.map(([input]) => new URL(input instanceof Request ? input.url : String(input)).searchParams.get("q"));
+        expect(queries.some((query) => query?.includes("name='test-bucket'"))).toBe(false);
+    });
+
     it("rejects requests without valid auth", async () => {
         const res = await worker.fetch(new Request(`${ENDPOINT}/api/objects?bucket=test-bucket`), ENV, CTX);
         expect(res.status).toBe(401);
@@ -341,6 +396,6 @@ describe("Object API (/api/objects)", () => {
         const expectedBytes = new Uint8Array(part1Data.byteLength + part2Data.byteLength);
         expectedBytes.set(part1Data, 0);
         expectedBytes.set(part2Data, part1Data.byteLength);
-        expect(storedFile!.data).toEqual(expectedBytes);
+        expect(storedFile?.data).toEqual(expectedBytes);
     });
 });

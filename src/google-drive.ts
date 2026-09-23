@@ -192,8 +192,8 @@ export async function updateDriveFile(accessToken: string, fileId: string, body:
 }
 
 /** Resolves an S3 object key to its existing parent folder ID without creating folders. Returns null if parent hierarchy doesn't exist. */
-export async function resolvePathToExistingFolderAndFile(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<{ parentFolderId: string; fileName: string } | null> {
-    let currentFolderId = await findBucketFolderId(accessToken, bucket, env);
+export async function resolvePathToExistingFolderAndFile(accessToken: string, bucket: string, objectKey: string, env: Env, bucketFolderId?: string): Promise<{ parentFolderId: string; fileName: string } | null> {
+    let currentFolderId = bucketFolderId ?? (await findBucketFolderId(accessToken, bucket, env));
     if (!currentFolderId) return null;
 
     const parts = objectKey.split("/").filter((p) => p);
@@ -304,8 +304,8 @@ export async function findFileInFolder(accessToken: string, folderId: string, fi
     return data.files && data.files.length > 0 ? data.files[0] : null;
 }
 
-export async function streamDownloadFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env, range?: string): Promise<DriveDownloadResult> {
-    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env);
+export async function streamDownloadFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env, range?: string, bucketFolderId?: string): Promise<DriveDownloadResult> {
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, bucketFolderId);
     if (!resolved) {
         throw new Error("File not found");
     }
@@ -370,8 +370,8 @@ export async function deleteFromDrive(accessToken: string, bucket: string, objec
     }
 }
 
-export async function getFileMetadata(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<DriveFileMetadata> {
-    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env);
+export async function getFileMetadata(accessToken: string, bucket: string, objectKey: string, env: Env, bucketFolderId?: string): Promise<DriveFileMetadata> {
+    const resolved = await resolvePathToExistingFolderAndFile(accessToken, bucket, objectKey, env, bucketFolderId);
     if (!resolved) {
         throw new Error("File not found");
     }
@@ -418,8 +418,8 @@ function splitPrefix(prefix: string): { dirPrefix: string; partial: string } {
 }
 
 /** Walks an existing (read-only) folder path under the bucket; returns null if any segment is missing. */
-async function resolvePrefixFolder(accessToken: string, bucket: string, dirParts: string[], env: Env): Promise<string | null> {
-    let folderId = await findBucketFolderId(accessToken, bucket, env);
+async function resolvePrefixFolder(accessToken: string, bucket: string, dirParts: string[], env: Env, bucketFolderId?: string): Promise<string | null> {
+    let folderId = bucketFolderId ?? (await findBucketFolderId(accessToken, bucket, env));
     for (const part of dirParts) {
         if (folderId === null) return null;
         folderId = await findFolderId(accessToken, part, folderId);
@@ -432,10 +432,10 @@ export interface ListedObject extends GoogleDriveFile {
 }
 
 /** Lists objects under a bucket, honoring an S3-style prefix and an optional single-level delimiter. */
-export async function listObjects(accessToken: string, bucket: string, prefix: string, env: Env, delimiter?: string): Promise<{ contents: ListedObject[]; commonPrefixes: string[]; truncated: boolean }> {
+export async function listObjects(accessToken: string, bucket: string, prefix: string, env: Env, delimiter?: string, bucketFolderId?: string): Promise<{ contents: ListedObject[]; commonPrefixes: string[]; truncated: boolean }> {
     const { dirPrefix, partial } = splitPrefix(prefix);
     const dirParts = dirPrefix.split("/").filter((part) => part !== "");
-    const folderId = await resolvePrefixFolder(accessToken, bucket, dirParts, env);
+    const folderId = await resolvePrefixFolder(accessToken, bucket, dirParts, env, bucketFolderId);
     if (folderId === null) return { contents: [], commonPrefixes: [], truncated: false };
 
     const contents: ListedObject[] = [];
