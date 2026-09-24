@@ -17,9 +17,11 @@ const LIST_NODE_CAP = 5000;
 const ROOT_PARENT = "root";
 const READ_LOOKUP_TTL = 300;
 const DRIVE_MEDIA_TIMEOUT_MS = 30_000;
-// Downloads are read as growing Range requests (1, 2, 4 ... 32 MiB) so the first byte arrives quickly.
+// Downloads are read as growing Range requests (1, 2, 4, 8, 8 ... MiB) so the first byte arrives quickly.
+// Drive waits before sending each range, so several ranges are fetched in parallel ahead of the one being streamed.
 const FIRST_RANGE_BYTES = 1024 * 1024;
-const MAX_RANGE_BYTES = 32 * 1024 * 1024;
+const MAX_RANGE_BYTES = 8 * 1024 * 1024;
+const PARALLEL_RANGES = 4;
 // Stays well inside the 50-subrequest limit of the Workers Free plan; larger files get larger ranges instead.
 const MAX_RANGE_REQUESTS = 32;
 const MAX_RANGE_ATTEMPTS = 3;
@@ -491,20 +493,27 @@ function isDriveRange(response: Response, start: number, end: number, size: numb
     return match !== null && Number(match[1]) === start && Number(match[2]) === end && Number(match[3]) === size;
 }
 
-/** Streams bytes [from, end] after the already-open first range, fetching the next range while the current one is piped. */
+/** Streams bytes [from, end] after the already-open first range, keeping up to PARALLEL_RANGES later ranges in flight. */
 function streamDriveRanges(env: Env, accessToken: string, fileId: string, size: number, first: ReadableStream, from: number, end: number, length: number): ReadableStream {
     const { readable, writable } = new FixedLengthStream(length);
     let token = accessToken;
+    let refreshing: Promise<string> | undefined;
     let offset = from;
     let chunkSize = FIRST_RANGE_BYTES;
     let requestsLeft = MAX_RANGE_REQUESTS - 1;
+    let slowestRangeMs = 0;
 
     const fetchRange = async (rangeStart: number, rangeEnd: number): Promise<ReadableStream> => {
         for (let attempt = 1; ; attempt++) {
             let status = 0;
+            const used = token;
             try {
-                const response = await fetchDriveMedia(token, fileId, `bytes=${rangeStart}-${rangeEnd}`);
-                if (response.body && response.status === 206 && isDriveRange(response, rangeStart, rangeEnd, size)) return response.body;
+                const startedAt = performance.now();
+                const response = await fetchDriveMedia(used, fileId, `bytes=${rangeStart}-${rangeEnd}`);
+                if (response.body && response.status === 206 && isDriveRange(response, rangeStart, rangeEnd, size)) {
+                    slowestRangeMs = Math.max(slowestRangeMs, performance.now() - startedAt);
+                    return response.body;
+                }
                 status = response.status;
                 await response.body?.cancel();
             } catch (error) {
@@ -516,9 +525,15 @@ function streamDriveRanges(env: Env, accessToken: string, fileId: string, size: 
                 throw new Error(`Drive range read returned ${status}`);
             }
             if (status === 401) {
-                // The cached token can expire while a long download is still streaming.
-                await env.AUTH_KV.delete("google_access_token");
-                token = await getAccessToken(env);
+                // The cached token can expire while a long download is still streaming; parallel ranges share one refresh.
+                if (token === used) {
+                    refreshing ??= env.AUTH_KV.delete("google_access_token")
+                        .then(() => getAccessToken(env))
+                        .finally(() => {
+                            refreshing = undefined;
+                        });
+                    token = await refreshing;
+                }
             } else {
                 await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
             }
@@ -538,20 +553,34 @@ function streamDriveRanges(env: Env, accessToken: string, fileId: string, size: 
     };
 
     const pump = async () => {
+        const startedAt = performance.now();
+        const pending: Array<Promise<ReadableStream>> = [];
         let body = first;
-        let next: Promise<ReadableStream> | undefined;
+        let ranges = 1;
+        let waitMs = 0;
         try {
             for (;;) {
-                next = nextRange();
+                while (pending.length < PARALLEL_RANGES) {
+                    const next = nextRange();
+                    if (!next) break;
+                    pending.push(next);
+                    ranges++;
+                }
                 await body.pipeTo(writable, { preventClose: true });
+                const next = pending.shift();
                 if (!next) break;
+                const waitStartedAt = performance.now();
                 body = await next;
-                next = undefined;
+                waitMs += performance.now() - waitStartedAt;
+            }
+            if (env.ENABLE_TIMING_LOGS === "true") {
+                // waitMs is how long the client received nothing because the next Drive range was not ready.
+                console.info(JSON.stringify({ type: "drive-range-timing", ranges, bytes: length, waitMs: Math.round(waitMs), slowestRangeMs: Math.round(slowestRangeMs), streamMs: Math.round(performance.now() - startedAt) }));
             }
             await writable.close();
         } catch (error) {
             // Either the client went away or Drive failed mid-stream; the client sees a short body and can retry.
-            next?.then((stream) => stream.cancel()).catch(() => {});
+            for (const next of pending) next.then((stream) => stream.cancel()).catch(() => {});
             await writable.abort(error).catch(() => {});
         }
     };

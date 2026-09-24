@@ -134,7 +134,9 @@ Successful S3 GET/HEAD object responses and REST content downloads include a `Se
 
 - `path`: resolve the parent folder hierarchy.
 - `file`: search for the file and read its metadata.
-- `media`: wait for the first Drive range of the download (at most 1 MiB); absent for HEAD. Larger downloads stream the remaining bytes as further Drive Range requests (growing up to 32 MiB each) after the response has started, so `media` is time to first byte, not transfer time.
+- `media`: wait for the first Drive range of the download (at most 1 MiB); absent for HEAD. Larger downloads stream the remaining bytes as further Drive Range requests (growing up to 8 MiB each, with up to 4 fetched in parallel ahead of the stream) after the response has started, so `media` is time to first byte, not transfer time.
+
+Downloads that need more than one Drive range also log one `type=drive-range-timing` record when the body finishes: `ranges` (Drive range requests), `bytes`, `slowestRangeMs` (longest wait for one range's headers), `streamMs` (total body time), and `waitMs`, the time the client received nothing because the next range was not ready yet. A high `waitMs` means Drive, not the client, is pacing the download.
 
 These phase durations are inside `dispatch`, not extra time to add to it. The header contains fixed names and numeric durations only. It does not expose object keys or IDs. Listing and unsuccessful object reads have no phase header (`serverTiming=null`); use their stage durations instead. REST timing logs retain their existing schema. Gitea may not forward storage response headers to the browser, so inspect Worker logs for its S3 calls rather than relying on Gitea DevTools alone.
 

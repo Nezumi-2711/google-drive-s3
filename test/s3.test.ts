@@ -357,6 +357,39 @@ describe("S3 compatibility", () => {
             expect(mediaRanges()).toEqual([`bytes=0-${MiB - 1}`, `bytes=${MiB}-${3 * MiB - 1}`, `bytes=${3 * MiB}-${data.byteLength - 1}`]);
         });
 
+        it("keeps four 8 MiB Drive ranges in flight ahead of the streamed range", async () => {
+            const big = new Uint8Array(40 * MiB);
+            drive.files.set("file-big", { id: "file-big", name: "big.bin", parent: "folder-test-bucket", mimeType: "application/octet-stream", data: big, md5Checksum: "big", modifiedTime: FAKE_MODIFIED_TIME });
+            const held: Array<() => void> = [];
+            vi.mocked(fetch).mockImplementation((input, init) => {
+                const range = new Headers(init?.headers).get("Range");
+                if (!range || range === `bytes=0-${MiB - 1}`) return drive.handle(input, init);
+                return new Promise((resolve) => held.push(() => resolve(drive.handle(input, init))));
+            });
+
+            const response = await worker.fetch(await signed("/test-bucket/big.bin", { method: "GET" }), ENV, CTX);
+            const reader = response.body?.getReader();
+            if (!reader) throw new Error("Download had no body");
+            expect((await reader.read()).done).toBe(false);
+
+            expect(mediaRanges()).toEqual([`bytes=0-${MiB - 1}`, `bytes=${MiB}-${3 * MiB - 1}`, `bytes=${3 * MiB}-${7 * MiB - 1}`, `bytes=${7 * MiB}-${15 * MiB - 1}`, `bytes=${15 * MiB}-${23 * MiB - 1}`]);
+            await reader.cancel();
+            for (const release of held) release();
+        });
+
+        it("logs how long the stream waited for Drive ranges when timing logs are enabled", async () => {
+            storeLarge();
+            const info = vi.spyOn(console, "info").mockImplementation(() => {});
+            try {
+                const response = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), { ...ENV, ENABLE_TIMING_LOGS: "true" }, CTX);
+                await expectBody(response, data);
+                const entries = info.mock.calls.map(([line]) => JSON.parse(String(line)));
+                expect(entries.find((entry) => entry.type === "drive-range-timing")).toEqual({ type: "drive-range-timing", ranges: 3, bytes: data.byteLength, waitMs: expect.any(Number), slowestRangeMs: expect.any(Number), streamMs: expect.any(Number) });
+            } finally {
+                info.mockRestore();
+            }
+        });
+
         it("stops reading Drive when the client closes early and serves the next request", async () => {
             storeLarge();
             const first = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), ENV, CTX);
