@@ -1,4 +1,4 @@
-import { deleteFromDrive, getFileMetadata, listObjects, streamDownloadFromDrive, streamUploadToDrive } from "./google-drive";
+import { deleteFromDrive, getFileMetadata, listObjects, RangeNotSatisfiableError, streamDownloadFromDrive, streamUploadToDrive } from "./google-drive";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, etag, listMultipartParts, MAX_COMPLETE_XML, parsePositiveInt, uploadPartCore } from "./multipart-core";
 import { S3Exception, s3Error } from "./s3-errors";
 import { bucketVersioningResult, completeMultipartUploadResult, generateListBucketResult, initiateMultipartUploadResult, listMultipartUploadsResult, listPartsResult, parseCompleteMultipartUpload } from "./s3-xml";
@@ -111,6 +111,7 @@ export async function dispatch(request: Request, env: Env, accessToken: string, 
             return new Response(file.body, { status: file.status, headers });
         } catch (error) {
             if (error instanceof Error && error.message === "File not found") return s3Error("NoSuchKey", 404, undefined, resource);
+            if (error instanceof RangeNotSatisfiableError) return s3Error("InvalidRange", 416, undefined, resource, false, { "Content-Range": `bytes */${error.size}` });
             throw error;
         }
     }

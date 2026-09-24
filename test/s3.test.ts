@@ -323,6 +323,128 @@ describe("S3 compatibility", () => {
         expect(await missing.text()).toContain("<Code>NoSuchKey</Code>");
     });
 
+    describe("large downloads", () => {
+        const MiB = 1024 * 1024;
+        const data = bytes(4 * MiB + 123);
+
+        function storeLarge(): void {
+            drive.files.set("file-large", { id: "file-large", name: "large.bin", parent: "folder-test-bucket", mimeType: "application/octet-stream", data, md5Checksum: fakeMd5(data), modifiedTime: FAKE_MODIFIED_TIME });
+        }
+
+        async function expectBody(response: Response, expected: Uint8Array): Promise<void> {
+            const actual = new Uint8Array(await response.arrayBuffer());
+            expect(actual.byteLength).toBe(expected.byteLength);
+            expect(actual.findIndex((byte, index) => byte !== expected[index])).toBe(-1);
+        }
+
+        function mediaRanges(): Array<string | null> {
+            return vi
+                .mocked(fetch)
+                .mock.calls.filter(([input]) => new URL(input instanceof Request ? input.url : String(input)).searchParams.get("alt") === "media")
+                .map(([input, init]) => (input instanceof Request ? input.headers : new Headers(init?.headers)).get("Range"));
+        }
+
+        it("streams a full download as growing Drive ranges", async () => {
+            storeLarge();
+            vi.mocked(fetch).mockClear();
+
+            const response = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), ENV, CTX);
+
+            expect(response.status).toBe(200);
+            expect(response.headers.get("Content-Length")).toBe(String(data.byteLength));
+            expect(response.headers.get("Content-Range")).toBeNull();
+            await expectBody(response, data);
+            expect(mediaRanges()).toEqual([`bytes=0-${MiB - 1}`, `bytes=${MiB}-${3 * MiB - 1}`, `bytes=${3 * MiB}-${data.byteLength - 1}`]);
+        });
+
+        it("stops reading Drive when the client closes early and serves the next request", async () => {
+            storeLarge();
+            const first = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), ENV, CTX);
+            const reader = first.body?.getReader();
+            if (!reader) throw new Error("Download had no body");
+            expect((await reader.read()).done).toBe(false);
+            await reader.cancel();
+
+            const second = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), ENV, CTX);
+            await expectBody(second, data);
+        });
+
+        it.each([
+            { range: "bytes=1000-2500000", start: 1000, end: 2_500_000 },
+            { range: "bytes=-10", start: 4 * MiB + 113, end: 4 * MiB + 122 },
+            { range: `bytes=${MiB}-`, start: MiB, end: 4 * MiB + 122 },
+            { range: "bytes=10-99999999", start: 10, end: 4 * MiB + 122 },
+        ])("serves $range across Drive ranges", async ({ range, start, end }) => {
+            storeLarge();
+            const response = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET", headers: { Range: range } }), ENV, CTX);
+            expect(response.status).toBe(206);
+            expect(response.headers.get("Content-Range")).toBe(`bytes ${start}-${end}/${data.byteLength}`);
+            expect(response.headers.get("Content-Length")).toBe(String(end - start + 1));
+            await expectBody(response, data.slice(start, end + 1));
+        });
+
+        it.each(["bytes=0-1,5-6", "bytes=9-2", "items=0-1"])("ignores unsupported Range %s like S3", async (range) => {
+            await worker.fetch(await signed("/test-bucket/small.txt", { method: "PUT", body: "0123456789" }), ENV, CTX);
+            const response = await worker.fetch(await signed("/test-bucket/small.txt", { method: "GET", headers: { Range: range } }), ENV, CTX);
+            expect(response.status).toBe(200);
+            expect(await response.text()).toBe("0123456789");
+        });
+
+        it.each(["bytes=10-", "bytes=-0"])("returns InvalidRange for unsatisfiable %s", async (range) => {
+            await worker.fetch(await signed("/test-bucket/small.txt", { method: "PUT", body: "0123456789" }), ENV, CTX);
+            const response = await worker.fetch(await signed("/test-bucket/small.txt", { method: "GET", headers: { Range: range } }), ENV, CTX);
+            expect(response.status).toBe(416);
+            expect(response.headers.get("Content-Range")).toBe("bytes */10");
+            expect(await response.text()).toContain("<Code>InvalidRange</Code>");
+        });
+
+        it("retries a later range after a transient error and an expired token", async () => {
+            storeLarge();
+            const failures = [503, 401];
+            vi.mocked(fetch).mockImplementation(async (input, init) => {
+                const range = new Headers(init?.headers).get("Range");
+                const status = range === `bytes=${MiB}-${3 * MiB - 1}` ? failures.shift() : undefined;
+                return status ? new Response("unavailable", { status }) : drive.handle(input, init);
+            });
+
+            const response = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), ENV, CTX);
+
+            await expectBody(response, data);
+            expect(failures).toEqual([]);
+            expect(mediaRanges().filter((range) => range === `bytes=${MiB}-${3 * MiB - 1}`)).toHaveLength(3);
+        });
+
+        it("errors the body instead of truncating silently when a later range fails", async () => {
+            storeLarge();
+            const error = vi.spyOn(console, "error").mockImplementation(() => {});
+            vi.mocked(fetch).mockImplementation(async (input, init) => {
+                const range = new Headers(init?.headers).get("Range");
+                return range?.startsWith(`bytes=${MiB}-`) ? new Response("forbidden", { status: 403 }) : drive.handle(input, init);
+            });
+
+            try {
+                const response = await worker.fetch(await signed("/test-bucket/large.bin", { method: "GET" }), ENV, CTX);
+                expect(response.status).toBe(200);
+                await expect(response.arrayBuffer()).rejects.toThrow();
+                expect(error).toHaveBeenCalledWith(JSON.stringify({ message: "drive range read failed", status: 403, attempt: 1 }));
+            } finally {
+                error.mockRestore();
+            }
+        });
+
+        it("re-resolves cached metadata when the live file size changed under the same ID", async () => {
+            await worker.fetch(await signed("/test-bucket/grown.txt", { method: "PUT", body: "old" }), ENV, CTX);
+            expect((await worker.fetch(await signed("/test-bucket/grown.txt", { method: "HEAD" }), ENV, CTX)).headers.get("Content-Length")).toBe("3");
+            const stored = [...drive.files.values()].find((file) => file.name === "grown.txt");
+            if (!stored) throw new Error("Uploaded file missing");
+            stored.data = new TextEncoder().encode("a longer replacement");
+
+            const response = await worker.fetch(await signed("/test-bucket/grown.txt", { method: "GET" }), ENV, CTX);
+            expect(response.headers.get("Content-Length")).toBe("20");
+            expect(await response.text()).toBe("a longer replacement");
+        });
+    });
+
     it("verifies PUT signatures with Accept-Encoding: identity even when Cloudflare rewrites the delivered value", async () => {
         const original = await signed("/test-bucket/ae.txt", { method: "PUT", body: "hello", headers: { "accept-encoding": "identity" } });
         const rewrittenHeaders = new Headers(original.headers);
