@@ -1,6 +1,6 @@
 import { escapeXml } from "./s3-xml";
 
-export type S3ErrorCode = "AccessDenied" | "SignatureDoesNotMatch" | "RequestTimeTooSkewed" | "NoSuchKey" | "NoSuchUpload" | "InvalidPart" | "InvalidPartOrder" | "EntityTooLarge" | "MalformedXML" | "InvalidArgument" | "MethodNotAllowed" | "NotImplemented" | "SlowDown" | "InternalError";
+export type S3ErrorCode = "AccessDenied" | "SignatureDoesNotMatch" | "RequestTimeTooSkewed" | "NoSuchKey" | "NoSuchUpload" | "InvalidPart" | "InvalidPartOrder" | "EntityTooLarge" | "MalformedXML" | "InvalidArgument" | "InvalidRange" | "MethodNotAllowed" | "NotImplemented" | "SlowDown" | "InternalError";
 
 const DEFAULT_MESSAGES: Record<S3ErrorCode, string> = {
     AccessDenied: "Access Denied",
@@ -13,6 +13,7 @@ const DEFAULT_MESSAGES: Record<S3ErrorCode, string> = {
     EntityTooLarge: "Your proposed upload exceeds the maximum allowed object size.",
     MalformedXML: "The XML you provided was not well-formed or did not validate against our published schema.",
     InvalidArgument: "Invalid argument.",
+    InvalidRange: "The requested range is not satisfiable",
     MethodNotAllowed: "The specified method is not allowed against this resource.",
     NotImplemented: "A header you provided implies functionality that is not implemented.",
     SlowDown: "Please reduce your request rate.",

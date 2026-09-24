@@ -16,6 +16,13 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 const LIST_NODE_CAP = 5000;
 const ROOT_PARENT = "root";
 const READ_LOOKUP_TTL = 300;
+const DRIVE_MEDIA_TIMEOUT_MS = 30_000;
+// Downloads are read as growing Range requests (1, 2, 4 ... 32 MiB) so the first byte arrives quickly.
+const FIRST_RANGE_BYTES = 1024 * 1024;
+const MAX_RANGE_BYTES = 32 * 1024 * 1024;
+// Stays well inside the 50-subrequest limit of the Workers Free plan; larger files get larger ranges instead.
+const MAX_RANGE_REQUESTS = 32;
+const MAX_RANGE_ATTEMPTS = 3;
 
 async function lookupCacheKey(kind: "folder" | "file", parentId: string | null, name: string): Promise<string> {
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([parentId, name])));
@@ -395,51 +402,161 @@ export async function streamDownloadFromDrive(accessToken: string, bucket: strin
         throw new Error("File not found");
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => {
-        controller.abort();
-    }, 30000);
+    const size = parseInt(file.size || "0", 10);
+    const requested = parseByteRange(range, size);
+    const start = requested?.start ?? 0;
+    const end = requested?.end ?? size - 1;
+    const firstEnd = Math.min(end, start + FIRST_RANGE_BYTES - 1);
 
+    // Always read ranges: a plain alt=media GET of a large file can wait ~30s for its first byte, which callers
+    // such as Forgejo (30s PER_WRITE_TIMEOUT, and two GETs per attachment download) cannot tolerate.
     const mediaStartedAt = performance.now();
-    let downloadRes: Response;
-    try {
-        downloadRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`, {
-            headers: { Authorization: `Bearer ${accessToken}`, ...(range ? { Range: range } : {}) },
-            signal: controller.signal,
-        });
-    } finally {
-        clearTimeout(timeout);
-    }
+    const downloadRes = await fetchDriveMedia(accessToken, file.id, size === 0 ? undefined : `bytes=${start}-${firstEnd}`);
     const mediaDuration = performance.now() - mediaStartedAt;
 
-    if (downloadRes.status === 404) {
+    // A 416 or a different total size means the cached metadata no longer describes the live file.
+    if (downloadRes.status === 404 || downloadRes.status === 416 || (downloadRes.status === 206 && !isDriveRange(downloadRes, start, firstEnd, size))) {
         await downloadRes.body?.cancel();
         if (useReadCache && env.ENABLE_READ_CACHE !== "false") {
             await invalidateDriveObjectCache(env, bucket, parentFolderId, fileName);
             return streamDownloadFromDrive(accessToken, bucket, objectKey, env, range, bucketFolderId, false);
         }
-        throw new Error("File not found");
+        if (downloadRes.status === 404) throw new Error("File not found");
+        console.error(JSON.stringify({ message: "drive media changed during download", status: downloadRes.status }));
+        throw new Error("Download failed");
     }
 
-    if (!downloadRes.ok) {
+    // Drive answering 200 to a Range request means it sent the whole file, usable only for a full download.
+    if (!downloadRes.ok || (downloadRes.status === 200 && requested)) {
         console.error(downloadRes.status);
         console.error(await downloadRes.text());
         throw new Error("Download failed");
     }
     if (!downloadRes.body) throw new Error("Download response had no body");
 
+    const length = end - start + 1;
+    const complete = downloadRes.status === 200 || firstEnd === end;
     return {
-        body: downloadRes.body,
+        body: complete ? downloadRes.body : streamDriveRanges(env, accessToken, file.id, size, downloadRes.body, firstEnd + 1, end, length),
         contentType: file.mimeType || "application/octet-stream",
-        size: parseInt(file.size || "0", 10),
+        size,
         id: file.id,
         md5Checksum: file.md5Checksum,
         modifiedTime: file.modifiedTime,
-        status: downloadRes.status,
-        contentRange: downloadRes.headers.get("Content-Range") ?? undefined,
-        contentLength: downloadRes.headers.get("Content-Length") ?? undefined,
+        status: requested ? 206 : 200,
+        contentRange: requested ? `bytes ${start}-${end}/${size}` : undefined,
+        contentLength: length.toString(),
         serverTiming: `path;dur=${pathDuration.toFixed(1)}, file;dur=${fileDuration.toFixed(1)}, media;dur=${mediaDuration.toFixed(1)}`,
     };
+}
+
+export class RangeNotSatisfiableError extends Error {
+    constructor(readonly size: number) {
+        super("Requested range not satisfiable");
+    }
+}
+
+/** Resolves a single `bytes=` range against the object size. Absent, malformed and multi-range headers return null (serve the whole object), as S3 does. */
+export function parseByteRange(header: string | undefined, size: number): { start: number; end: number } | null {
+    const match = header ? /^bytes=(\d*)-(\d*)$/.exec(header.trim()) : null;
+    if (!match || (match[1] === "" && match[2] === "")) return null;
+    if (match[1] === "") {
+        const suffix = Number(match[2]);
+        if (suffix === 0 || size === 0) throw new RangeNotSatisfiableError(size);
+        return { start: Math.max(0, size - suffix), end: size - 1 };
+    }
+    const start = Number(match[1]);
+    if (match[2] !== "" && Number(match[2]) < start) return null;
+    if (start >= size) throw new RangeNotSatisfiableError(size);
+    return { start, end: match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1) };
+}
+
+async function fetchDriveMedia(accessToken: string, fileId: string, range?: string): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+        controller.abort();
+    }, DRIVE_MEDIA_TIMEOUT_MS);
+    try {
+        return await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            headers: { Authorization: `Bearer ${accessToken}`, ...(range ? { Range: range } : {}) },
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function isDriveRange(response: Response, start: number, end: number, size: number): boolean {
+    const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get("Content-Range") ?? "");
+    return match !== null && Number(match[1]) === start && Number(match[2]) === end && Number(match[3]) === size;
+}
+
+/** Streams bytes [from, end] after the already-open first range, fetching the next range while the current one is piped. */
+function streamDriveRanges(env: Env, accessToken: string, fileId: string, size: number, first: ReadableStream, from: number, end: number, length: number): ReadableStream {
+    const { readable, writable } = new FixedLengthStream(length);
+    let token = accessToken;
+    let offset = from;
+    let chunkSize = FIRST_RANGE_BYTES;
+    let requestsLeft = MAX_RANGE_REQUESTS - 1;
+
+    const fetchRange = async (rangeStart: number, rangeEnd: number): Promise<ReadableStream> => {
+        for (let attempt = 1; ; attempt++) {
+            let status = 0;
+            try {
+                const response = await fetchDriveMedia(token, fileId, `bytes=${rangeStart}-${rangeEnd}`);
+                if (response.body && response.status === 206 && isDriveRange(response, rangeStart, rangeEnd, size)) return response.body;
+                status = response.status;
+                await response.body?.cancel();
+            } catch (error) {
+                if (attempt >= MAX_RANGE_ATTEMPTS) throw error;
+            }
+            const retryable = status === 0 || status === 401 || status === 429 || status >= 500;
+            if (!retryable || attempt >= MAX_RANGE_ATTEMPTS) {
+                console.error(JSON.stringify({ message: "drive range read failed", status, attempt }));
+                throw new Error(`Drive range read returned ${status}`);
+            }
+            if (status === 401) {
+                // The cached token can expire while a long download is still streaming.
+                await env.AUTH_KV.delete("google_access_token");
+                token = await getAccessToken(env);
+            } else {
+                await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+            }
+        }
+    };
+
+    const nextRange = (): Promise<ReadableStream> | undefined => {
+        if (offset > end) return undefined;
+        chunkSize = Math.max(Math.min(chunkSize * 2, MAX_RANGE_BYTES), Math.ceil((end - offset + 1) / Math.max(1, requestsLeft)));
+        const rangeStart = offset;
+        const rangeEnd = Math.min(end, offset + chunkSize - 1);
+        offset = rangeEnd + 1;
+        requestsLeft--;
+        const pending = fetchRange(rangeStart, rangeEnd);
+        pending.catch(() => {});
+        return pending;
+    };
+
+    const pump = async () => {
+        let body = first;
+        let next: Promise<ReadableStream> | undefined;
+        try {
+            for (;;) {
+                next = nextRange();
+                await body.pipeTo(writable, { preventClose: true });
+                if (!next) break;
+                body = await next;
+                next = undefined;
+            }
+            await writable.close();
+        } catch (error) {
+            // Either the client went away or Drive failed mid-stream; the client sees a short body and can retry.
+            next?.then((stream) => stream.cancel()).catch(() => {});
+            await writable.abort(error).catch(() => {});
+        }
+    };
+    void pump();
+    return readable;
 }
 
 export async function deleteFromDrive(accessToken: string, bucket: string, objectKey: string, env: Env): Promise<void> {

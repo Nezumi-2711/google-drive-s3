@@ -1,6 +1,6 @@
 import { jsonResponse } from "./auth-api";
 import { findBucketRecord } from "./bucket-registry";
-import { deleteFromDrive, findFolderId, getAccessToken, getFileMetadata, invalidateDriveFolderCache, listObjects, resolvePathToExistingFolderAndFile, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive, updateDriveFile } from "./google-drive";
+import { deleteFromDrive, findFolderId, getAccessToken, getFileMetadata, invalidateDriveFolderCache, listObjects, RangeNotSatisfiableError, resolvePathToExistingFolderAndFile, resolvePathToFolderAndFile, streamDownloadFromDrive, streamUploadToDrive, updateDriveFile } from "./google-drive";
 import { abortMultipartUpload, completeMultipartUpload, createMultipartUpload, etag, listMultipartParts, parsePositiveInt, uploadPartCore } from "./multipart-core";
 import type { Env } from "./types";
 
@@ -79,6 +79,7 @@ export async function handleTicketDownload(request: Request, env: Env): Promise<
         if (message.includes("not found") || message.includes("File not found")) {
             return jsonResponse({ message: "Object not found" }, 404);
         }
+        if (err instanceof RangeNotSatisfiableError) return jsonResponse({ message: err.message }, 416, { "Content-Range": `bytes */${err.size}` });
         return jsonResponse({ message: "Failed to download object" }, 500);
     }
 }
@@ -225,6 +226,7 @@ export async function handleObjectRoutes(request: Request, env: Env, subSegments
                 if (message.includes("not found") || message.includes("File not found")) {
                     return jsonResponse({ message: "Object not found" }, 404);
                 }
+                if (err instanceof RangeNotSatisfiableError) return jsonResponse({ message }, 416, { "Content-Range": `bytes */${err.size}` });
                 return jsonResponse({ message }, 500);
             }
         }
